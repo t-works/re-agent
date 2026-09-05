@@ -1,14 +1,17 @@
-// Minimal ReAct agent loop + CLI. Run: node agent.mjs
-const { exec } = require('child_process');
-const fs = require('fs');
-const readline = require('readline');
-const cfg = require('./config');
+// Minimal ReAct agent loop + CLI. Run: npm run build && node dist/agent.js
+import { exec } from 'child_process';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { createInterface } from 'readline';
+import cfg from './config';
 
 if (!cfg.apiKey) { console.error('Set DEEPSEEK_API_KEY first.'); process.exit(1); }
 
-const systemPrompt = fs.readFileSync(__dirname + '/system.txt', 'utf8');
+const systemPrompt = readFileSync(join(__dirname, '..', 'system.txt'), 'utf8');
 
-async function askLLM(messages) {
+type Message = { role: 'system' | 'user' | 'assistant'; content: string };
+
+async function askLLM(messages: Message[]): Promise<string> {
   const res = await fetch(cfg.baseURL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
@@ -18,7 +21,7 @@ async function askLLM(messages) {
   return (await res.json()).choices[0].message.content;
 }
 
-function runTool(actionInput) { // returns { ok, output }
+function runTool(actionInput: string): Promise<{ ok: boolean; output: string }> { // returns { ok, output }
   return new Promise((resolve) => {
     exec(actionInput, { timeout: 30000 }, (err, stdout, stderr) => {
       if (err) resolve({ ok: false, output: (stderr || err.message).trim() });
@@ -27,8 +30,8 @@ function runTool(actionInput) { // returns { ok, output }
   });
 }
 
-async function runQuestion(question) {
-  const messages = [{ role: 'system', content: systemPrompt }, { role: 'user', content: question }];
+async function runQuestion(question: string): Promise<string> {
+  const messages: Message[] = [{ role: 'system', content: systemPrompt }, { role: 'user', content: question }];
   for (let i = 0; i < cfg.maxIterations; i++) {
     const reply = await askLLM(messages);
     console.log('\n' + reply + '\n' + '-'.repeat(60));
@@ -48,11 +51,13 @@ async function runQuestion(question) {
   return 'Max iterations reached.';
 }
 
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const rl = createInterface({ input: process.stdin, output: process.stdout });
+let closed = false;
+rl.on('close', () => { closed = true; });
 const prompt = () => rl.question('\nYou: ', async (q) => {
   if (['quit', 'exit', 'q'].includes(q.trim().toLowerCase())) { rl.close(); return; }
-  try { console.log('\nAgent: ' + await runQuestion(q)); } catch (e) { console.error('Error:', e.message); }
-  if (!rl.closed) prompt();
+  try { console.log('\nAgent: ' + await runQuestion(q)); } catch (e) { console.error('Error:', (e as Error).message); }
+  if (!closed) prompt();
 });
 console.log('ReAct agent. Ask anything (q = quit).');
 prompt();
