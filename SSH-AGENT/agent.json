@@ -1,0 +1,4 @@
+{
+  "name": "ssh",
+  "description": "manages the remote host 'waszawa' (configured in SSH-AGENT/*.host.json) by running shell commands over SSH with the run_ssh tool — use for anything that must happen on that host"
+}

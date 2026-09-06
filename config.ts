@@ -3,5 +3,5 @@ export default {
   apiKey: process.env.DEEPSEEK_API_KEY,
   baseURL: 'https://api.deepseek.com/chat/completions',
   model: 'deepseek-chat',
-  maxIterations: 10,
+  maxIterations: 30,
 };
