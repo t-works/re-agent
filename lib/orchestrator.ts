@@ -10,9 +10,11 @@ import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join, relative } from 'path';
-import { reactLoop, runCommand } from './react';
+import { reactLoop } from './react';
 import type { LoopEvent, Tool } from './react';
-import cfg from '../config';
+import { runCommand } from '../tools/run-command';
+import { makeRunSshTool } from '../tools/ssh';
+import cfg from '../conf/config';
 
 const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
 const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
@@ -119,10 +121,13 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
         run: (args) => delegate(String(args.name ?? ''), String(args.task ?? ''), sessionDir),
       };
 
+      const runSsh = makeRunSshTool();
+      const tools: Tool[] = [runCommand, ...(runSsh ? [runSsh] : []), delegateTool];
+
       const result = await reactLoop({
         systemPrompt,
         task: question,
-        tools: [runCommand, delegateTool],
+        tools,
         onEvent: (e) => emit?.(e),
         model: cfg.orchestratorModel,
         reasoningEffort: cfg.orchestratorReasoningEffort,

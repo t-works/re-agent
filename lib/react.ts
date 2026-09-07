@@ -3,8 +3,7 @@
 // (function_call output items); we run each call, feed the result back as a
 // function_call_output item, and repeat until the model answers with a plain
 // message. Stateless: the full history rides along in `input` every request.
-import { exec } from 'child_process';
-import cfg from '../config';
+import cfg from '../conf/config';
 
 export type Tool = {
   name: string;
@@ -171,22 +170,3 @@ export async function reactLoop({
   }
   return { ok: false, output: 'Max iterations reached.', log };
 }
-
-/** Generic local shell tool (used by the orchestrator). */
-export const runCommand: Tool = {
-  name: 'run_command',
-  description:
-    "Run a shell command on this local machine and return its output. Use it for anything on this machine: filesystem, running programs, facts you don't know.",
-  parameters: {
-    type: 'object',
-    properties: { command: { type: 'string', description: 'the exact shell command to run' } },
-    required: ['command'],
-  },
-  run: (args) =>
-    new Promise((resolve) => {
-      exec(String(args.command ?? ''), { timeout: 30000 }, (err, stdout, stderr) => {
-        if (err) resolve({ ok: false, output: (stderr || err.message).trim() });
-        else resolve({ ok: true, output: stdout.trim() });
-      });
-    }),
-};

@@ -2,7 +2,7 @@
 // logic here — swap this file for an HTTP front-end and the core is unchanged.
 // Run: npm run build && node dist/agent.js
 import { createInterface } from 'readline';
-import cfg from './config';
+import cfg from './conf/config';
 import { createOrchestrator } from './lib/orchestrator';
 import type { TurnEvent } from './lib/orchestrator';
 import { printLoopEvent } from './lib/react';
