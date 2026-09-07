@@ -1,7 +1,19 @@
-// DeepSeek config — token comes from env (export DEEPSEEK_API_KEY=...)
+// DeepSeek Responses API config — keys come from env (export DEEPSEEK_API_KEY=...).
+// Reasoning effort values: none | minimal | low | medium | high | xhigh | max
 export default {
   apiKey: process.env.DEEPSEEK_API_KEY,
-  baseURL: 'https://api.deepseek.com/chat/completions',
-  model: 'deepseek-chat',
+  baseURL: 'https://api.deepseek.com/responses',
+
+  // Defaults for sub-agents and any generic reactLoop caller.
+  model: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
+  reasoningEffort: process.env.DEEPSEEK_REASONING_EFFORT || 'none',
+
+  // Orchestrator overrides — same value today, separate knobs for later
+  // (e.g. move the orchestrator to v4-pro or higher reasoning effort without
+  // touching the sub-agents' cost profile).
+  orchestratorModel: process.env.DEEPSEEK_ORCHESTRATOR_MODEL || 'deepseek-v4-flash',
+  orchestratorReasoningEffort: process.env.DEEPSEEK_ORCHESTRATOR_REASONING_EFFORT || 'none',
+
+  maxOutputTokens: 4096,
   maxIterations: 30,
 };

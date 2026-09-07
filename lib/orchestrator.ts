@@ -11,7 +11,8 @@ import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join, relative } from 'path';
 import { reactLoop, runCommand } from './react';
-import type { LoopEvent } from './react';
+import type { LoopEvent, Tool } from './react';
+import cfg from '../config';
 
 const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
 const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
@@ -43,19 +44,18 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
     agents.length ? agents.map((a) => `- ${a.name}: ${a.description}`).join('\n') : '- (none)'
   );
 
-  /** delegate <name> <task>: hand a task to a sub-agent through the session mailbox. */
-  async function delegate(input: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
-    const m = input.match(/^(\S+)\s+([\s\S]*)$/);
-    if (!m) return { ok: false, output: 'Usage: delegate <agent name> <task>' };
-    const agent = agents.find((a) => a.name === m[1]);
-    if (!agent) return { ok: false, output: `Unknown agent: ${m[1]}. Known: ${agents.map((a) => a.name).join(', ')}` };
+  /** Hand a task to a sub-agent through the session mailbox (native structured args — no text parsing). */
+  async function delegate(name: string, task: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
+    if (!name || !task) return { ok: false, output: 'Usage: delegate with a name and a task' };
+    const agent = agents.find((a) => a.name === name);
+    if (!agent) return { ok: false, output: `Unknown agent: ${name}. Known: ${agents.map((a) => a.name).join(', ')}` };
 
     const tid = randomUUID();
     const taskDir = join(sessionDir, 'agent-tasks', tid);
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(
       join(taskDir, 'task.json'),
-      JSON.stringify({ id: tid, from: 'orchestrator', to: agent.name, task: m[2].trim() }, null, 2)
+      JSON.stringify({ id: tid, from: 'orchestrator', to: agent.name, task: task.trim() }, null, 2)
     );
 
     const taskListFile = join(sessionDir, 'task-list.json');
@@ -101,11 +101,31 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
       writeFileSync(join(sessionDir, 'task-list.json'), JSON.stringify([], null, 2));
       emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(SRC_ROOT, sessionDir)})\n` });
 
+      const delegateTool: Tool = {
+        name: 'delegate',
+        description: agents.length
+          ? `Hand a task to a specialist sub-agent and wait for its report. Agents:\n${agents
+              .map((a) => `- ${a.name}: ${a.description}`)
+              .join('\n')}`
+          : '(no sub-agents registered — never use this tool)',
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'sub-agent name, exactly as listed in the description' },
+            task: { type: 'string', description: 'the task to hand over, in natural language' },
+          },
+          required: ['name', 'task'],
+        },
+        run: (args) => delegate(String(args.name ?? ''), String(args.task ?? ''), sessionDir),
+      };
+
       const result = await reactLoop({
         systemPrompt,
         task: question,
-        tools: [runCommand, { name: 'delegate', run: (i) => delegate(i, sessionDir) }],
+        tools: [runCommand, delegateTool],
         onEvent: (e) => emit?.(e),
+        model: cfg.orchestratorModel,
+        reasoningEffort: cfg.orchestratorReasoningEffort,
       });
       return { ...result, sid };
     },

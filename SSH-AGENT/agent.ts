@@ -46,16 +46,32 @@ function runPlink(h: Host, cmd: string): Promise<{ ok: boolean; output: string }
   });
 }
 
-/** Build the run_ssh tool: single host -> plain command; multiple hosts -> first token picks the host. */
+/** Build the run_ssh tool: single host -> plain command; multiple hosts -> an explicit host arg. */
 function runSsh(hosts: Host[]): Tool {
+  const single = hosts.length === 1;
   return {
     name: 'run_ssh',
-    run: async (input: string) => {
-      if (hosts.length === 1) return runPlink(hosts[0], input.trim());
-      const [name, ...rest] = input.trim().split(/\s+/);
-      const host = hosts.find((h) => h.name === name);
-      if (!host) return { ok: false, output: `Unknown host. Known: ${hosts.map((h) => h.name).join(', ')}. Prefix the command with the host name.` };
-      return runPlink(host, rest.join(' '));
+    description: single
+      ? `Run a shell command over SSH on the remote host '${hosts[0].name}' (${hosts[0].host}).`
+      : `Run a shell command over SSH on a remote host. Hosts: ${hosts
+          .map((h) => `${h.name} (${h.host})`)
+          .join(', ')}. Pass the host name to pick one.`,
+    parameters: {
+      type: 'object',
+      properties: {
+        ...(single
+          ? {}
+          : { host: { type: 'string', description: `one of: ${hosts.map((h) => h.name).join(', ')}` } }),
+        command: { type: 'string', description: 'the exact remote shell command to run' },
+      },
+      required: single ? ['command'] : ['host', 'command'],
+    },
+    run: async (args) => {
+      const command = String(args.command ?? '').trim();
+      if (!command) return { ok: false, output: 'run_ssh needs a command' };
+      const host = single ? hosts[0] : hosts.find((h) => h.name === String(args.host ?? ''));
+      if (!host) return { ok: false, output: `Unknown host. Known: ${hosts.map((h) => h.name).join(', ')}` };
+      return runPlink(host, command);
     },
   };
 }
