@@ -6,6 +6,18 @@ export type Tool = { name: string; run: (input: string) => Promise<{ ok: boolean
 export type Message = { role: 'system' | 'user' | 'assistant'; content: string };
 export type LoopResult = { ok: boolean; output: string; log: string[] };
 
+// What happened during a loop step. Emitted to the caller (CLI prints, API
+// streams/ignores) — the core never writes to stdout itself.
+export type LoopEvent =
+  | { kind: 'assistant'; content: string }
+  | { kind: 'observation'; ok: boolean; output: string };
+
+// Convenience renderer for CLI drivers, reproduces the old inline console.logs.
+export function printLoopEvent(e: LoopEvent) {
+  if (e.kind === 'assistant') console.log('\n' + e.content + '\n' + '-'.repeat(60));
+  else console.log(`Observation: ${e.ok ? 'ok' : 'ERROR'}: ${e.output || '(empty)'}`);
+}
+
 async function askLLM(messages: Message[]): Promise<string> {
   const res = await fetch(cfg.baseURL, {
     method: 'POST',
@@ -20,6 +32,7 @@ export async function reactLoop(opts: {
   systemPrompt: string;
   task: string;
   tools: Tool[];
+  onEvent?: (e: LoopEvent) => void;
 }): Promise<LoopResult> {
   const log: string[] = [];
   const messages: Message[] = [
@@ -28,7 +41,7 @@ export async function reactLoop(opts: {
   ];
   for (let i = 0; i < cfg.maxIterations; i++) {
     const reply = await askLLM(messages);
-    console.log('\n' + reply + '\n' + '-'.repeat(60));
+    opts.onEvent?.({ kind: 'assistant', content: reply });
     log.push(reply);
     const final = reply.match(/Final Answer:\s*([\s\S]*)/);
     if (final) return { ok: true, output: final[1].trim(), log };
@@ -47,7 +60,7 @@ export async function reactLoop(opts: {
 
     messages.push({ role: 'assistant', content: reply });
     const { ok, output } = await tool.run(input[1].trim());
-    console.log(`Observation: ${ok ? 'ok' : 'ERROR'}: ${output || '(empty)'}`);
+    opts.onEvent?.({ kind: 'observation', ok, output });
     log.push(`Observation: ${ok ? 'ok' : 'ERROR'}: ${output || '(empty)'}`);
     messages.push({ role: 'user', content: `Observation: ${ok ? output : 'ERROR: ' + output}` });
   }

@@ -1,0 +1,141 @@
+// Orchestrator core: answers one question by running a ReAct loop with local
+// tools, delegating to sub-agents (dirs with agent.json) via text-file mailboxes.
+// Transport-free — no stdin/stdout/readline here. CLI (agent.ts) and a future
+// API front-end both call createOrchestrator().ask().
+// Memory layout:
+//   memory/sessions/session-list.json              [{ session-uuid, datetime }]
+//   memory/sessions/<session-uuid>/task-list.json  [{ task-uuid, datetime, agent, sequence, status }]
+//   memory/sessions/<session-uuid>/agent-tasks/<task-uuid>/{task,result}.json
+import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import { join, relative } from 'path';
+import { reactLoop, runCommand } from './react';
+import type { LoopEvent } from './react';
+
+const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
+const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
+
+export type AgentDef = { name: string; description: string; dir: string };
+type SessionEntry = { 'session-uuid': string; datetime: string };
+type TaskEntry = {
+  'task-uuid': string;
+  datetime: string;
+  agent: string;
+  sequence: number;
+  status: 'in progress' | 'success' | 'error';
+};
+
+// Loop events plus pre-formatted side notes (session banner, sub-agent trace).
+export type TurnEvent = LoopEvent | { kind: 'note'; content: string };
+export type TurnResult = { ok: boolean; output: string; log: string[]; sid: string };
+
+export type Orchestrator = {
+  agents: AgentDef[];
+  ask(question: string): Promise<TurnResult>;
+};
+
+export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator {
+  const agents = loadRegistry();
+  const systemPrompt = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace(
+    '{agents}',
+    agents.length ? agents.map((a) => `- ${a.name}: ${a.description}`).join('\n') : '- (none)'
+  );
+
+  // delegate <name> <task>: hand a task to a sub-agent through the session mailbox.
+  async function delegate(input: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
+    const m = input.match(/^(\S+)\s+([\s\S]*)$/);
+    if (!m) return { ok: false, output: 'Usage: delegate <agent name> <task>' };
+    const agent = agents.find((a) => a.name === m[1]);
+    if (!agent) return { ok: false, output: `Unknown agent: ${m[1]}. Known: ${agents.map((a) => a.name).join(', ')}` };
+
+    const tid = randomUUID();
+    const taskDir = join(sessionDir, 'agent-tasks', tid);
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(
+      join(taskDir, 'task.json'),
+      JSON.stringify({ id: tid, from: 'orchestrator', to: agent.name, task: m[2].trim() }, null, 2)
+    );
+
+    const taskListFile = join(sessionDir, 'task-list.json');
+    const sequence = readJson<TaskEntry[]>(taskListFile, []).length;
+    appendEntry(taskListFile, {
+      'task-uuid': tid,
+      datetime: new Date().toISOString(),
+      agent: agent.name,
+      sequence,
+      status: 'in progress',
+    });
+    emit?.({ kind: 'note', content: `\n>>> delegating to ${agent.name} (#${sequence}, mailbox: ${relative(SRC_ROOT, taskDir)}) <<<\n` });
+
+    const agentJs = join(__dirname, '..', agent.dir, 'agent.js');
+    await new Promise<void>((resolve) => {
+      // Pipe the sub-agent's trace back through emit (instead of stdio inherit) so an
+      // API front-end receives it as events rather than writing to server stdout.
+      const child = spawn(process.execPath, [agentJs, taskDir]);
+      child.stdout.on('data', (d) => emit?.({ kind: 'note', content: d.toString() }));
+      child.stderr.on('data', (d) => emit?.({ kind: 'note', content: d.toString() }));
+      child.on('error', () => resolve());
+      child.on('close', () => resolve());
+    });
+
+    try {
+      const result = JSON.parse(readFileSync(join(taskDir, 'result.json'), 'utf8')) as { ok: boolean; output: string };
+      setTaskStatus(sessionDir, tid, result.ok ? 'success' : 'error');
+      return { ok: result.ok, output: `[${agent.name}] ${result.output}` };
+    } catch {
+      setTaskStatus(sessionDir, tid, 'error');
+      return { ok: false, output: `${agent.name} agent crashed without a result (${relative(SRC_ROOT, taskDir)})` };
+    }
+  }
+
+  return {
+    agents,
+    // one chat turn = one session
+    async ask(question: string): Promise<TurnResult> {
+      const sid = randomUUID();
+      const sessionDir = join(SESSIONS_ROOT, sid);
+      mkdirSync(join(sessionDir, 'agent-tasks'), { recursive: true });
+      appendEntry(join(SESSIONS_ROOT, 'session-list.json'), { 'session-uuid': sid, datetime: new Date().toISOString() });
+      writeFileSync(join(sessionDir, 'task-list.json'), JSON.stringify([], null, 2));
+      emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(SRC_ROOT, sessionDir)})\n` });
+
+      const result = await reactLoop({
+        systemPrompt,
+        task: question,
+        tools: [runCommand, { name: 'delegate', run: (i) => delegate(i, sessionDir) }],
+        onEvent: (e) => emit?.(e),
+      });
+      return { ...result, sid };
+    },
+  };
+}
+
+function loadRegistry(): AgentDef[] {
+  return readdirSync(SRC_ROOT, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .flatMap((d) => {
+      const metaFile = join(SRC_ROOT, d.name, 'agent.json');
+      if (!existsSync(metaFile)) return [];
+      const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as { name?: string; description?: string };
+      return [{ name: meta.name ?? d.name, description: meta.description ?? '', dir: d.name }];
+    });
+}
+
+function readJson<T>(file: string, fallback: T): T {
+  try { return JSON.parse(readFileSync(file, 'utf8')) as T; } catch { return fallback; }
+}
+
+function appendEntry(file: string, entry: SessionEntry | TaskEntry) {
+  const list = readJson<(SessionEntry | TaskEntry)[]>(file, []);
+  list.push(entry);
+  writeFileSync(file, JSON.stringify(list, null, 2));
+}
+
+function setTaskStatus(sessionDir: string, taskUuid: string, status: TaskEntry['status']) {
+  const file = join(sessionDir, 'task-list.json');
+  const list = readJson<TaskEntry[]>(file, []);
+  const entry = list.find((t) => t['task-uuid'] === taskUuid);
+  if (entry) entry.status = status;
+  writeFileSync(file, JSON.stringify(list, null, 2));
+}

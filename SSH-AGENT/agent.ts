@@ -5,7 +5,7 @@ import { spawn } from 'child_process';
 import { readFileSync, readdirSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import cfg from '../config';
-import { reactLoop } from '../lib/react';
+import { reactLoop, printLoopEvent } from '../lib/react';
 import type { Tool } from '../lib/react';
 
 if (!cfg.apiKey) { console.error('Set DEEPSEEK_API_KEY first.'); process.exit(1); }
@@ -73,7 +73,7 @@ async function main() {
   }
 
   const systemPrompt = readFileSync(join(SRC_ROOT, 'SSH-AGENT', 'system.txt'), 'utf8');
-  const result = await reactLoop({ systemPrompt, task: task.task, tools: [runSsh(hosts)] });
+  const result = await reactLoop({ systemPrompt, task: task.task, tools: [runSsh(hosts)], onEvent: printLoopEvent });
   writeFileSync(
     join(workDir, 'result.json'),
     JSON.stringify({ id: task.id, from: 'ssh', ok: result.ok, output: result.output, log: result.log }, null, 2)
