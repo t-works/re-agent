@@ -12,12 +12,13 @@ export type LoopEvent =
   | { kind: 'assistant'; content: string }
   | { kind: 'observation'; ok: boolean; output: string };
 
-// Convenience renderer for CLI drivers, reproduces the old inline console.logs.
+/** Convenience renderer for CLI drivers, reproduces the old inline console.logs. */
 export function printLoopEvent(e: LoopEvent) {
   if (e.kind === 'assistant') console.log('\n' + e.content + '\n' + '-'.repeat(60));
   else console.log(`Observation: ${e.ok ? 'ok' : 'ERROR'}: ${e.output || '(empty)'}`);
 }
 
+/** Send the message history to the LLM and return the assistant's reply text. */
 async function askLLM(messages: Message[]): Promise<string> {
   const res = await fetch(cfg.baseURL, {
     method: 'POST',
@@ -28,7 +29,16 @@ async function askLLM(messages: Message[]): Promise<string> {
   return (await res.json()).choices[0].message.content;
 }
 
-export async function reactLoop(opts: {
+/**
+ * Run the ReAct loop: the model picks Action / Action Input, we run the tool and feed the
+ * Observation back, repeating until a Final Answer or maxIterations. Emits each step via onEvent.
+ */
+export async function reactLoop({
+  systemPrompt,
+  task,
+  tools,
+  onEvent,
+}: {
   systemPrompt: string;
   task: string;
   tools: Tool[];
@@ -36,12 +46,12 @@ export async function reactLoop(opts: {
 }): Promise<LoopResult> {
   const log: string[] = [];
   const messages: Message[] = [
-    { role: 'system', content: opts.systemPrompt },
-    { role: 'user', content: opts.task },
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: task },
   ];
   for (let i = 0; i < cfg.maxIterations; i++) {
     const reply = await askLLM(messages);
-    opts.onEvent?.({ kind: 'assistant', content: reply });
+    onEvent?.({ kind: 'assistant', content: reply });
     log.push(reply);
     const final = reply.match(/Final Answer:\s*([\s\S]*)/);
     if (final) return { ok: true, output: final[1].trim(), log };
@@ -49,25 +59,25 @@ export async function reactLoop(opts: {
     const action = reply.match(/Action:\s*(\w+)/);
     const input = reply.match(/Action Input:\s*([\s\S]*)/);
     if (!action || !input) return { ok: false, output: 'Model stopped without a Final Answer.', log };
-    const tool = opts.tools.find((t) => t.name === action[1]);
+    const tool = tools.find((t) => t.name === action[1]);
     if (!tool) {
       return {
         ok: false,
-        output: `Unknown action: ${action[1]}. Known: ${opts.tools.map((t) => t.name).join(', ')}`,
+        output: `Unknown action: ${action[1]}. Known: ${tools.map((t) => t.name).join(', ')}`,
         log,
       };
     }
 
     messages.push({ role: 'assistant', content: reply });
     const { ok, output } = await tool.run(input[1].trim());
-    opts.onEvent?.({ kind: 'observation', ok, output });
+    onEvent?.({ kind: 'observation', ok, output });
     log.push(`Observation: ${ok ? 'ok' : 'ERROR'}: ${output || '(empty)'}`);
     messages.push({ role: 'user', content: `Observation: ${ok ? output : 'ERROR: ' + output}` });
   }
   return { ok: false, output: 'Max iterations reached.', log };
 }
 
-// Generic local shell tool (used by the orchestrator).
+/** Generic local shell tool (used by the orchestrator). */
 export const runCommand: Tool = {
   name: 'run_command',
   run: (input: string) =>

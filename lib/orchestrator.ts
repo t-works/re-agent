@@ -35,6 +35,7 @@ export type Orchestrator = {
   ask(question: string): Promise<TurnResult>;
 };
 
+/** Load the sub-agent registry (dirs with agent.json) and build an orchestrator; emit receives every loop/note event. */
 export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator {
   const agents = loadRegistry();
   const systemPrompt = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace(
@@ -42,7 +43,7 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
     agents.length ? agents.map((a) => `- ${a.name}: ${a.description}`).join('\n') : '- (none)'
   );
 
-  // delegate <name> <task>: hand a task to a sub-agent through the session mailbox.
+  /** delegate <name> <task>: hand a task to a sub-agent through the session mailbox. */
   async function delegate(input: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
     const m = input.match(/^(\S+)\s+([\s\S]*)$/);
     if (!m) return { ok: false, output: 'Usage: delegate <agent name> <task>' };
@@ -91,7 +92,7 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
 
   return {
     agents,
-    // one chat turn = one session
+    /** One chat turn = one session. */
     async ask(question: string): Promise<TurnResult> {
       const sid = randomUUID();
       const sessionDir = join(SESSIONS_ROOT, sid);
@@ -111,6 +112,7 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
   };
 }
 
+/** Scan the project root for dirs containing agent.json, returning one AgentDef per sub-agent. */
 function loadRegistry(): AgentDef[] {
   return readdirSync(SRC_ROOT, { withFileTypes: true })
     .filter((d) => d.isDirectory())
@@ -122,16 +124,19 @@ function loadRegistry(): AgentDef[] {
     });
 }
 
+/** Read and parse a JSON file, returning fallback if missing or corrupt. */
 function readJson<T>(file: string, fallback: T): T {
   try { return JSON.parse(readFileSync(file, 'utf8')) as T; } catch { return fallback; }
 }
 
+/** Append an entry to a JSON list file, creating the file with [entry] if absent. */
 function appendEntry(file: string, entry: SessionEntry | TaskEntry) {
   const list = readJson<(SessionEntry | TaskEntry)[]>(file, []);
   list.push(entry);
   writeFileSync(file, JSON.stringify(list, null, 2));
 }
 
+/** Flip one task's status in a session's task-list.json. */
 function setTaskStatus(sessionDir: string, taskUuid: string, status: TaskEntry['status']) {
   const file = join(sessionDir, 'task-list.json');
   const list = readJson<TaskEntry[]>(file, []);

@@ -14,7 +14,7 @@ const SRC_ROOT = join(__dirname, '..', '..'); // dist/SSH-AGENT -> project root
 
 type Host = { name: string; host: string; user: string; password: string };
 
-// SSH-AGENT/*.host.json: {"host": "<ENV_VAR>", "user": "<ENV_VAR>", "pass": "<ENV_VAR>"}
+/** Load SSH-AGENT/*.host.json host configs; each value names an env var holding the real secret. */
 function loadHosts(): Host[] {
   const dir = join(SRC_ROOT, 'SSH-AGENT');
   return readdirSync(dir)
@@ -26,6 +26,7 @@ function loadHosts(): Host[] {
     });
 }
 
+/** Run one command on host h via plink, resolving {ok, output} instead of throwing. */
 function runPlink(h: Host, cmd: string): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
     const child = spawn('plink', ['-ssh', '-l', h.user, '-pw', h.password, h.host, cmd]);
@@ -45,7 +46,7 @@ function runPlink(h: Host, cmd: string): Promise<{ ok: boolean; output: string }
   });
 }
 
-// Single host -> plain command. Multiple hosts -> first token picks the host.
+/** Build the run_ssh tool: single host -> plain command; multiple hosts -> first token picks the host. */
 function runSsh(hosts: Host[]): Tool {
   return {
     name: 'run_ssh',
@@ -59,6 +60,7 @@ function runSsh(hosts: Host[]): Tool {
   };
 }
 
+/** Entry point (spawned by the orchestrator with a mailbox dir): run the ReAct loop and write result.json. */
 async function main() {
   const workDir = process.argv[2];
   if (!workDir) { console.error('Usage: node agent.js <workDir containing task.json>'); process.exit(1); }
