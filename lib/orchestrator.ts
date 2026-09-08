@@ -169,24 +169,7 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
       const writers = agents.filter((a) => a.hasMemory);
       if (!writers.length) return { ok: true, output: 'no hasMemory agents registered', log: [], sid: '' };
       const sessions = sids ?? readJson<SessionEntry[]>(join(SESSIONS_ROOT, 'session-list.json'), []).map((s) => s['session-uuid']);
-
-      // Fold each session's agent-task transcripts under the receiving agent's name.
-      const perAgent = new Map<string, string[]>();
-      for (const sid of sessions) {
-        const tasksDir = join(SESSIONS_ROOT, sid, 'agent-tasks');
-        if (!existsSync(tasksDir)) continue;
-        for (const tid of readdirSync(tasksDir)) {
-          try {
-            const t = JSON.parse(readFileSync(join(tasksDir, tid, 'task.json'), 'utf8')) as { to?: string; task?: string };
-            if (!t.to || !t.task) continue;
-            const r = JSON.parse(readFileSync(join(tasksDir, tid, 'result.json'), 'utf8')) as { ok?: boolean; output?: string };
-            const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + `… (${s.length} chars total)` : s);
-            const xs = perAgent.get(t.to) ?? [];
-            xs.push(`--- session ${sid.slice(0, 8)} ---\nTASK: ${clip(t.task, 1500)}\nRESULT (ok=${r.ok ?? false}): ${clip(r.output ?? '(empty)', 1500)}`);
-            perAgent.set(t.to, xs);
-          } catch { /* missing/corrupt task or result — skip */ }
-        }
-      }
+      const perAgent = collectTranscripts(sessions);
 
       const notes: string[] = [];
       for (const w of writers) {
@@ -225,6 +208,30 @@ function loadRegistry(): AgentDef[] {
 /** Read and parse a JSON file, returning fallback if missing or corrupt. */
 function readJson<T>(file: string, fallback: T): T {
   try { return JSON.parse(readFileSync(file, 'utf8')) as T; } catch { return fallback; }
+}
+
+/**
+ * Fold each session's agent-task transcripts into a map keyed by the receiving
+ * agent's name (as written in task.json). Missing/corrupt entries are skipped.
+ */
+function collectTranscripts(sids: string[]): Map<string, string[]> {
+  const perAgent = new Map<string, string[]>();
+  for (const sid of sids) {
+    const tasksDir = join(SESSIONS_ROOT, sid, 'agent-tasks');
+    if (!existsSync(tasksDir)) continue;
+    for (const tid of readdirSync(tasksDir)) {
+      try {
+        const t = JSON.parse(readFileSync(join(tasksDir, tid, 'task.json'), 'utf8')) as { to?: string; task?: string };
+        if (!t.to || !t.task) continue;
+        const r = JSON.parse(readFileSync(join(tasksDir, tid, 'result.json'), 'utf8')) as { ok?: boolean; output?: string };
+        const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + `… (${s.length} chars total)` : s);
+        const xs = perAgent.get(t.to) ?? [];
+        xs.push(`--- session ${sid.slice(0, 8)} ---\nTASK: ${clip(t.task, 1500)}\nRESULT (ok=${r.ok ?? false}): ${clip(r.output ?? '(empty)', 1500)}`);
+        perAgent.set(t.to, xs);
+      } catch { /* missing/corrupt task or result — skip */ }
+    }
+  }
+  return perAgent;
 }
 
 
