@@ -8,18 +8,18 @@
 // memoryWriter owns the knowledge base).
 import { basename, join } from 'path';
 import { readFileSync, writeFileSync } from 'fs';
-import cfg from '../conf/config';
-import { reactLoop, printLoopEvent } from '../lib/react';
-import type { Tool } from '../lib/react';
-import { makeMailboxAsker, wrapGuarded } from '../lib/guard';
-import { readMemoryTools, memoryHubSection } from '../lib/memory';
-import { runCommand } from '../tools/run-command';
-import { makeRunSshTool } from '../tools/ssh';
+import cfg from '../../conf/config';
+import { reactLoop, printLoopEvent } from '../../lib/react';
+import type { Tool } from '../../lib/react';
+import { makeMailboxAsker, wrapGuarded } from '../../lib/guard';
+import { readMemoryTools, memoryHubSection } from '../../lib/memory';
+import { runCommand } from '../../tools/run-command';
+import { makeRunSshTool } from '../../tools/ssh';
 
 if (!cfg.apiKey) { console.error('Set DEEPSEEK_API_KEY first.'); process.exit(1); }
 
-const SRC_ROOT = join(__dirname, '..', '..'); // dist/CONFIG-EDITOR -> project root
-const MY_DIR = join(SRC_ROOT, basename(__dirname)); // source dir of this agent
+const SRC_ROOT = join(__dirname, '..', '..', '..'); // dist/agents/CONFIG-EDITOR -> project root
+const MY_DIR = join(SRC_ROOT, 'agents', basename(__dirname)); // source dir of this agent
 
 async function main() {
   const taskDir = process.argv[2];

@@ -20,6 +20,7 @@ import cfg from '../conf/config';
 import policy from '../conf/guardrails';
 
 const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
+const AGENTS_ROOT = join(SRC_ROOT, 'agents'); // every sub-agent lives in agents/<name>/
 const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
 
 export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean };
@@ -229,15 +230,17 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
   };
 }
 
-/** Scan the project root for dirs containing agent.json, returning one AgentDef per sub-agent. */
+/** Scan agents/ for dirs containing agent.json, returning one AgentDef per sub-agent. */
 function loadRegistry(): AgentDef[] {
-  return readdirSync(SRC_ROOT, { withFileTypes: true })
+  if (!existsSync(AGENTS_ROOT)) return [];
+  return readdirSync(AGENTS_ROOT, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .flatMap((d) => {
-      const metaFile = join(SRC_ROOT, d.name, 'agent.json');
+      const metaFile = join(AGENTS_ROOT, d.name, 'agent.json');
       if (!existsSync(metaFile)) return [];
       const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as { name?: string; description?: string; hasMemory?: boolean };
-      return [{ name: meta.name ?? d.name, description: meta.description ?? '', dir: d.name, hasMemory: meta.hasMemory === true }];
+      // dir is project-root-relative (dist mirrors it: dist/agents/<name>/agent.js).
+      return [{ name: meta.name ?? d.name, description: meta.description ?? '', dir: join('agents', d.name), hasMemory: meta.hasMemory === true }];
     });
 }
 

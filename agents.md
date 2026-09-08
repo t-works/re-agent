@@ -1,6 +1,7 @@
 # ReAct agent project — conventions & structure for agents
 
 Read this before touching the codebase. It is the map; code is the territory.
+If something related to this doc changes as project evolves update this document.
 
 ## What this is
 
@@ -24,10 +25,10 @@ conf/ssh-hosts.ts        SSH hosts; secrets = env var NAMES, never values
 conf/guardrails.ts       deny/ask command policy (edit freely)
 tools/run-command.ts     run_command tool (local shell)
 tools/ssh.ts             run_ssh tool (plink → conf/ssh-hosts.ts)
-<SUB-AGENT>/             one dir per sub-agent, e.g. CONFIG-EDITOR/
+agents/<SUB-AGENT>/     one dir per sub-agent, e.g. agents/CONFIG-EDITOR/
   agent.json             { name, description, hasMemory }
   system.txt             that agent's system prompt
-  agent.ts               entry; compiled to dist/<SUB-AGENT>/agent.js
+  agent.ts               entry; compiled to dist/agents/<SUB-AGENT>/agent.js
 memory/                  GITIGNORED: sessions/ (mailboxes) + agents/ (KB notes)
 docs/feat/               future-feature descriptions (write when deferring)
 smoke.js                 `npm run smoke` = build + off-line assertions
@@ -53,12 +54,13 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   output, not exceptions).
 - **reactLoop** is stateless: full history rides in `input` every request.
   Tools are re-registered per turn.
-- **Sub-agent contract**: orchestrator spawns `node dist/<DIR>/agent.js
+- **Sub-agent contract**: orchestrator spawns `node dist/agents/<DIR>/agent.js
   <taskDir>` where `<taskDir>` = `memory/sessions/<sid>/agent-tasks/<tid>/`.
   Child reads `task.json` ({ id, from, to, task }), runs its own reactLoop,
   writes `result.json` ({ id, from, ok, output, log }), exits 0/1. Traces are
   piped to the user as raw stdout — don't print secrets.
-- **Registry**: any root dir with `agent.json` is a sub-agent. Fields:
+- **Registry**: any dir under `agents/` with `agent.json` is a sub-agent.
+  Fields:
   `name` (delegate handle), `description` (shown to the orchestrator model),
   `hasMemory: true` to opt into memory. A sub-agent assembles its OWN toolset
   in its agent.ts (shared builders from lib/ and tools/).
