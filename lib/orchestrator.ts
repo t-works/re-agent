@@ -3,8 +3,7 @@
 // Transport-free — no stdin/stdout/readline here. CLI (agent.ts) and a future
 // API front-end both call createOrchestrator().ask().
 // Memory layout:
-//   memory/sessions/session-list.json              [{ session-uuid, datetime }]
-//   memory/sessions/<session-uuid>/task-list.json  [{ task-uuid, datetime, agent, sequence, status }]
+//   memory/sessions/session-list.json              [{ session-uuid }]
 //   memory/sessions/<session-uuid>/agent-tasks/<task-uuid>/{task,result}.json
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
@@ -24,14 +23,7 @@ const AGENTS_ROOT = join(SRC_ROOT, 'agents'); // every sub-agent lives in agents
 const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
 
 export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean };
-type SessionEntry = { 'session-uuid': string; datetime: string };
-type TaskEntry = {
-  'task-uuid': string;
-  datetime: string;
-  agent: string;
-  sequence: number;
-  status: 'in progress' | 'success' | 'error';
-};
+type SessionEntry = { 'session-uuid': string };
 
 // Loop events plus pre-formatted side notes (session banner, sub-agent trace).
 export type TurnEvent = LoopEvent | { kind: 'note'; content: string };
@@ -52,10 +44,8 @@ export type Orchestrator = {
  */
 export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: ApprovalRequest) => Promise<boolean>): Orchestrator {
   const agents = loadRegistry();
-  const systemPrompt = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace(
-    '{agents}',
-    agents.length ? agents.map((a) => `- ${a.name}: ${a.description}`).join('\n') : '- (none)'
-  );
+  const roster = agents.map((a) => `- ${a.name}: ${a.description}`).join('\n');
+  const systemPrompt = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace('{agents}', roster || '- (none)');
 
   /** Hand a task to a sub-agent through the session mailbox (native structured args — no text parsing). */
   async function delegate(name: string, task: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
@@ -71,16 +61,7 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
       JSON.stringify({ id: tid, from: 'orchestrator', to: agent.name, task: task.trim() }, null, 2)
     );
 
-    const taskListFile = join(sessionDir, 'task-list.json');
-    const sequence = readJson<TaskEntry[]>(taskListFile, []).length;
-    appendEntry(taskListFile, {
-      'task-uuid': tid,
-      datetime: new Date().toISOString(),
-      agent: agent.name,
-      sequence,
-      status: 'in progress',
-    });
-    emit?.({ kind: 'note', content: `\n>>> delegating to ${agent.name} (#${sequence}, mailbox: ${relative(SRC_ROOT, taskDir)}) <<<\n` });
+    emit?.({ kind: 'note', content: `\n>>> delegating to ${agent.name} (mailbox: ${relative(SRC_ROOT, taskDir)}) <<<\n` });
 
     const agentJs = join(__dirname, '..', agent.dir, 'agent.js');
     await new Promise<void>((resolve) => {
@@ -126,10 +107,8 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
 
     try {
       const result = JSON.parse(readFileSync(join(taskDir, 'result.json'), 'utf8')) as { ok: boolean; output: string };
-      setTaskStatus(sessionDir, tid, result.ok ? 'success' : 'error');
       return { ok: result.ok, output: `[${agent.name}] ${result.output}` };
     } catch {
-      setTaskStatus(sessionDir, tid, 'error');
       return { ok: false, output: `${agent.name} agent crashed without a result (${relative(SRC_ROOT, taskDir)})` };
     }
   }
@@ -141,16 +120,15 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
       const sid = randomUUID();
       const sessionDir = join(SESSIONS_ROOT, sid);
       mkdirSync(join(sessionDir, 'agent-tasks'), { recursive: true });
-      appendEntry(join(SESSIONS_ROOT, 'session-list.json'), { 'session-uuid': sid, datetime: new Date().toISOString() });
-      writeFileSync(join(sessionDir, 'task-list.json'), JSON.stringify([], null, 2));
+      const sessions = readJson<SessionEntry[]>(join(SESSIONS_ROOT, 'session-list.json'), []);
+      sessions.push({ 'session-uuid': sid });
+      writeFileSync(join(SESSIONS_ROOT, 'session-list.json'), JSON.stringify(sessions, null, 2));
       emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(SRC_ROOT, sessionDir)})\n` });
 
       const delegateTool: Tool = {
         name: 'delegate',
         description: agents.length
-          ? `Hand a task to a specialist sub-agent and wait for its report. Agents:\n${agents
-              .map((a) => `- ${a.name}: ${a.description}`)
-              .join('\n')}`
+          ? `Hand a task to a specialist sub-agent and wait for its report. Agents:\n${roster}`
           : '(no sub-agents registered — never use this tool)',
         parameters: {
           type: 'object',
@@ -167,7 +145,7 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
       // One guardrail policy for both command tools — picking the other tool is not a
       // way around it. Ask verdicts go to the human (auto-deny when no hook is wired).
       const ask = async (q: ApprovalRequest) => (confirm ? confirm(q) : false);
-      const localRun = wrapGuarded({ ...runCommand }, ask);
+      const localRun = wrapGuarded(runCommand, ask);
       const tools: Tool[] = [localRun, ...(runSsh ? [wrapGuarded(runSsh, ask)] : []), delegateTool];
 
       const result = await reactLoop({
@@ -190,7 +168,7 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
     async finalize(sids?: string[]): Promise<TurnResult> {
       const writers = agents.filter((a) => a.hasMemory);
       if (!writers.length) return { ok: true, output: 'no hasMemory agents registered', log: [], sid: '' };
-      const sessions = sids ?? readJson<{ 'session-uuid': string }[]>(join(SESSIONS_ROOT, 'session-list.json'), []).map((s) => s['session-uuid']);
+      const sessions = sids ?? readJson<SessionEntry[]>(join(SESSIONS_ROOT, 'session-list.json'), []).map((s) => s['session-uuid']);
 
       // Fold each session's agent-task transcripts under the receiving agent's name.
       const perAgent = new Map<string, string[]>();
@@ -249,18 +227,4 @@ function readJson<T>(file: string, fallback: T): T {
   try { return JSON.parse(readFileSync(file, 'utf8')) as T; } catch { return fallback; }
 }
 
-/** Append an entry to a JSON list file, creating the file with [entry] if absent. */
-function appendEntry(file: string, entry: SessionEntry | TaskEntry) {
-  const list = readJson<(SessionEntry | TaskEntry)[]>(file, []);
-  list.push(entry);
-  writeFileSync(file, JSON.stringify(list, null, 2));
-}
 
-/** Flip one task's status in a session's task-list.json. */
-function setTaskStatus(sessionDir: string, taskUuid: string, status: TaskEntry['status']) {
-  const file = join(sessionDir, 'task-list.json');
-  const list = readJson<TaskEntry[]>(file, []);
-  const entry = list.find((t) => t['task-uuid'] === taskUuid);
-  if (entry) entry.status = status;
-  writeFileSync(file, JSON.stringify(list, null, 2));
-}
