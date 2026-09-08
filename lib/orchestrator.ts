@@ -8,18 +8,21 @@
 //   memory/sessions/<session-uuid>/agent-tasks/<task-uuid>/{task,result}.json
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { join, relative } from 'path';
 import { reactLoop } from './react';
 import type { LoopEvent, Tool } from './react';
 import { runCommand } from '../tools/run-command';
 import { makeRunSshTool } from '../tools/ssh';
+import { wrapGuarded, type ApprovalRequest } from './guard';
+import { loadMemoryContext, MEMORY_WRITER_SYSTEM, writeMemoryTools } from './memory';
 import cfg from '../conf/config';
+import policy from '../conf/guardrails';
 
 const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
 const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
 
-export type AgentDef = { name: string; description: string; dir: string };
+export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean };
 type SessionEntry = { 'session-uuid': string; datetime: string };
 type TaskEntry = {
   'task-uuid': string;
@@ -36,10 +39,17 @@ export type TurnResult = { ok: boolean; output: string; log: string[]; sid: stri
 export type Orchestrator = {
   agents: AgentDef[];
   ask(question: string): Promise<TurnResult>;
+  /** End-of-session memory consolidation over the given session ids (all sessions if omitted). */
+  finalize(sids?: string[]): Promise<TurnResult>;
 };
 
-/** Load the sub-agent registry (dirs with agent.json) and build an orchestrator; emit receives every loop/note event. */
-export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator {
+/**
+ * Build an orchestrator. emit receives every loop/note event; confirm lets a
+ * front-end answer approval requests (ask-gated commands) interactively — a
+ * transport-free hook, the CLI implements it with readline, an API later with
+ * an HTTP round-trip. Without confirm, ask-gated commands are auto-denied.
+ */
+export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: ApprovalRequest) => Promise<boolean>): Orchestrator {
   const agents = loadRegistry();
   const systemPrompt = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace(
     '{agents}',
@@ -78,8 +88,39 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
       const child = spawn(process.execPath, [agentJs, taskDir]);
       child.stdout.on('data', (d) => emit?.({ kind: 'note', content: d.toString() }));
       child.stderr.on('data', (d) => emit?.({ kind: 'note', content: d.toString() }));
-      child.on('error', () => resolve());
-      child.on('close', () => resolve());
+
+      // Human-approval gate: while the sub-agent lives, watch its mailbox for an
+      // ask.json (a gated command awaiting approval). Relay it to the front-end's
+      // confirm() hook and drop the answer into answer.json; the sub-agent's tool
+      // resolves on the next poll and either executes or stands down. No confirm
+      // hook = safe auto-deny. Same fixed cadence as the child's own poll.
+      let approving = false;
+      const iv = setInterval(() => {
+        if (approving) return;
+        let q: ApprovalRequest | null = null;
+        try {
+          q = JSON.parse(readFileSync(join(taskDir, 'ask.json'), 'utf8')) as ApprovalRequest;
+        } catch {
+          return; // absent or still being written
+        }
+        approving = true;
+        rmSync(join(taskDir, 'ask.json'), { force: true });
+        void (async () => {
+          try {
+            const approved = confirm ? await confirm(q as ApprovalRequest) : false;
+            writeFileSync(join(taskDir, 'answer.json'), JSON.stringify({ approved, at: new Date().toISOString() }, null, 2));
+          } finally {
+            approving = false;
+          }
+        })();
+      }, policy.pollIntervalMs);
+      child.on('error', () => { clearInterval(iv); resolve(); });
+      child.on('close', () => {
+        clearInterval(iv);
+        rmSync(join(taskDir, 'ask.json'), { force: true }); // no stale asks/answers for the next delegate
+        rmSync(join(taskDir, 'answer.json'), { force: true });
+        resolve();
+      });
     });
 
     try {
@@ -122,7 +163,11 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
       };
 
       const runSsh = makeRunSshTool();
-      const tools: Tool[] = [runCommand, ...(runSsh ? [runSsh] : []), delegateTool];
+      // One guardrail policy for both command tools — picking the other tool is not a
+      // way around it. Ask verdicts go to the human (auto-deny when no hook is wired).
+      const ask = async (q: ApprovalRequest) => (confirm ? confirm(q) : false);
+      const localRun = wrapGuarded({ ...runCommand }, ask);
+      const tools: Tool[] = [localRun, ...(runSsh ? [wrapGuarded(runSsh, ask)] : []), delegateTool];
 
       const result = await reactLoop({
         systemPrompt,
@@ -134,6 +179,53 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void): Orchestrator 
       });
       return { ...result, sid };
     },
+
+    /**
+     * End-of-session memory consolidation: for every hasMemory agent that did work
+     * in the given sessions, run one memoryWriter distillation pass (a model-only
+     * reactLoop with write_spoke/write_index tools) over the task/result transcripts.
+     * Synthetic by design — durable facts only, never raw per-delegate noise.
+     */
+    async finalize(sids?: string[]): Promise<TurnResult> {
+      const writers = agents.filter((a) => a.hasMemory);
+      if (!writers.length) return { ok: true, output: 'no hasMemory agents registered', log: [], sid: '' };
+      const sessions = sids ?? readJson<{ 'session-uuid': string }[]>(join(SESSIONS_ROOT, 'session-list.json'), []).map((s) => s['session-uuid']);
+
+      // Fold each session's agent-task transcripts under the receiving agent's name.
+      const perAgent = new Map<string, string[]>();
+      for (const sid of sessions) {
+        const tasksDir = join(SESSIONS_ROOT, sid, 'agent-tasks');
+        if (!existsSync(tasksDir)) continue;
+        for (const tid of readdirSync(tasksDir)) {
+          try {
+            const t = JSON.parse(readFileSync(join(tasksDir, tid, 'task.json'), 'utf8')) as { to?: string; task?: string };
+            if (!t.to || !t.task) continue;
+            const r = JSON.parse(readFileSync(join(tasksDir, tid, 'result.json'), 'utf8')) as { ok?: boolean; output?: string };
+            const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n) + `… (${s.length} chars total)` : s);
+            const xs = perAgent.get(t.to) ?? [];
+            xs.push(`--- session ${sid.slice(0, 8)} ---\nTASK: ${clip(t.task, 1500)}\nRESULT (ok=${r.ok ?? false}): ${clip(r.output ?? '(empty)', 1500)}`);
+            perAgent.set(t.to, xs);
+          } catch { /* missing/corrupt task or result — skip */ }
+        }
+      }
+
+      const notes: string[] = [];
+      for (const w of writers) {
+        const transcripts = perAgent.get(w.name);
+        if (!transcripts?.length) continue;
+        const { hub, spokes } = loadMemoryContext(w.name);
+        const context =
+          `Current hub (index.md):\n${hub ?? '(none yet)'}\n\nCurrent spokes:\n` +
+          (spokes.length ? spokes.map((s) => `--- ${s.file} ---\n${s.content}`).join('\n\n') : '(none)');
+        const result = await reactLoop({
+          systemPrompt: MEMORY_WRITER_SYSTEM,
+          task: `Consolidate memory for agent "${w.name}".\n\n${context}\n\nSessions to distill into durable memory:\n\n${transcripts.join('\n\n')}`,
+          tools: writeMemoryTools(w.name),
+        });
+        notes.push(`memoryWriter(${w.name}): ${result.ok ? result.output.slice(0, 300) : 'failed: ' + result.output.slice(0, 200)}`);
+      }
+      return { ok: true, output: notes.length ? notes.join('\n') : 'no memory-worthy activity in these sessions', log: [], sid: '' };
+    },
   };
 }
 
@@ -144,8 +236,8 @@ function loadRegistry(): AgentDef[] {
     .flatMap((d) => {
       const metaFile = join(SRC_ROOT, d.name, 'agent.json');
       if (!existsSync(metaFile)) return [];
-      const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as { name?: string; description?: string };
-      return [{ name: meta.name ?? d.name, description: meta.description ?? '', dir: d.name }];
+      const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as { name?: string; description?: string; hasMemory?: boolean };
+      return [{ name: meta.name ?? d.name, description: meta.description ?? '', dir: d.name, hasMemory: meta.hasMemory === true }];
     });
 }
 

@@ -1,0 +1,5 @@
+{
+  "name": "config-editor",
+  "description": "Host configuration editor. Inspects host configuration over SSH, reasons about it, plans changes, and applies them safely (backup, validate, atomic replace) — every state-changing command on a remote host is paused for human approval. Delegate all remote host configuration work here; never edit server config yourself.",
+  "hasMemory": true
+}
