@@ -12,8 +12,9 @@ export default {
   // (e.g. move the orchestrator to v4-pro or higher reasoning effort without
   // touching the sub-agents' cost profile).
   orchestratorModel: process.env.DEEPSEEK_ORCHESTRATOR_MODEL || 'deepseek-v4-flash',
-  orchestratorReasoningEffort: process.env.DEEPSEEK_ORCHESTRATOR_REASONING_EFFORT || 'none',
+  // orchestratorReasoningEffort: process.env.DEEPSEEK_ORCHESTRATOR_REASONING_EFFORT || 'high',
+  orchestratorReasoningEffort: 'high',
 
-  maxOutputTokens: 4096,
-  maxIterations: 30,
+  maxOutputTokens: 1000000,
+  maxIterations: 130,
 };
