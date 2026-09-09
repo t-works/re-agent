@@ -198,6 +198,27 @@ const echoTool = {
   assert.ok(gone.output.includes('Cannot read'));
   rmSync(idir, { recursive: true, force: true });
 
+  // --- 11) Short-term memory: transcript roundtrip + last-conversation pointer ---
+  const stm = require('./dist/lib/stm');
+  assert.strictEqual(stm.isValidConvId('a.b-c_d'), true);
+  assert.strictEqual(stm.isValidConvId('../evil'), false, 'conv ids must not traverse paths');
+  const conv = 'smoke' + Date.now();
+  const convRoot = join(__dirname, 'memory', 'conversations');
+  const priorLast = stm.lastConvId();
+  stm.appendTurn(conv, { sid: 's1', q: 'which hosts run nginx?', output: 'warszawa' });
+  stm.appendTurn(conv, { sid: 's2', q: 'check disk', output: '12% used' });
+  const ctx = stm.recentContext(conv, 10);
+  assert.strictEqual(ctx.count, 2);
+  assert.ok(ctx.block.includes('warszawa') && ctx.block.includes('check disk'), 'context must carry both turns');
+  const capped = stm.recentContext(conv, 1);
+  assert.strictEqual(capped.count, 1);
+  assert.ok(capped.block.includes('check disk') && !capped.block.includes('warszawa'), 'k cap must keep the newest turns');
+  assert.strictEqual(stm.recentContext('no-such-conv').block, '', 'missing transcript must yield an empty block');
+  stm.rememberLast(conv);
+  assert.strictEqual(stm.lastConvId(), conv, 'last pointer must roundtrip');
+  rmSync(join(convRoot, conv), { recursive: true, force: true });
+  if (priorLast) stm.rememberLast(priorLast); else rmSync(join(convRoot, 'last.txt'), { force: true });
+
   console.log(`smoke ok — core silent, ${orch.agents.length} sub-agents registered`);
   console.log(`  agents: ${orch.agents.map((a) => `${a.name}${a.hasMemory ? ' (memory)' : ''}`).join(', ')}`);
 })().catch((e) => { console.error(e); process.exit(1); });

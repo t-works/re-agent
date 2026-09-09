@@ -20,6 +20,7 @@ lib/react.ts             shared ReAct loop over the Responses API (stateless)
 lib/orchestrator.ts      turn orchestration, delegate() (mailbox spawn), finalize()
 lib/guard.ts             guardrail classification + approval gates (deny/ask)
 lib/memory.ts            hub-and-spoke memory store, tools, memoryWriter prompt
+lib/stm.ts               short-term conversation transcript (restart continuity)
 conf/config.ts           model/API config (env-driven)
 conf/ssh-hosts.ts        SSH hosts; secrets = env var NAMES, never values
 conf/guardrails.ts       deny/ask command policy (edit freely)
@@ -31,6 +32,7 @@ agents/<SUB-AGENT>/     one dir per sub-agent, e.g. agents/CONFIG-EDITOR/
   system.txt             that agent's system prompt
   agent.ts               entry; compiled to dist/agents/<SUB-AGENT>/agent.js
 memory/                  GITIGNORED: sessions/ (mailboxes) + agents/ (KB notes)
+                         + conversations/ (short-term transcripts, lib/stm.ts)
 docs/feat/               future-feature descriptions (write when deferring)
 smoke.js                 `npm run smoke` = build + off-line assertions
 ```
@@ -38,7 +40,11 @@ smoke.js                 `npm run smoke` = build + off-line assertions
 ## Build / run / test
 
 - `npm run build` — `tsc` (all `*.ts` incl. sub-agent dirs → `dist/`)
-- `node dist/agent.js` — CLI. Requires `DEEPSEEK_API_KEY`.
+- `node dist/agent.js [--new | --resume <convId>]` — CLI. Requires
+  `DEEPSEEK_API_KEY`. A bare start resumes the last conversation; `--new`
+  starts fresh. At the prompt, `restart` re-execs the process so boot-time
+  state (agent registry, compiled sub-agents) reloads — conversation context
+  rides back in from short-term memory (see below).
 - `npm run smoke` — build + off-line checks (no network). Extend it when you
   add non-trivial logic; it caught a real bug already.
 - Model knobs: `DEEPSEEK_MODEL`, `DEEPSEEK_REASONING_EFFORT`, orchestrator
@@ -103,6 +109,21 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   stay synthetic/durable — no per-delegate clutter, no raw logs.
 - Spoke names are path-validated; keep it that way. Growth/scale ideas live in
   `docs/feat/agent-memory.md` — when context budgets bite, read it.
+
+## Short-term memory (conversation continuity across restarts)
+
+Separate from the long-term KB above: a per-conversation Q/A log in
+`memory/conversations/<convId>/transcript.jsonl` (one JSON line per turn),
+written by `createOrchestrator` when given a `convId` (the CLI always does;
+`last.txt` points at the most recent conversation). On boot the CLI loads the
+last 10 turns (`lib/stm.ts` → `recentContext`, clipped per field) and hands
+`resumeContext` to the orchestrator, which appends it to the system prompt —
+so a restarted process knows what the conversation covered. Restoration is
+deliberately lossy-but-cheap (recent gist, not replay); the full transcript
+stays on disk. `restart` finalizes this process's long-term memory, re-execs
+with `--resume <convId>` (detached, inherited stdio), and exits. Raw + rolling
+on purpose: compaction into summaries is future work, and conversations that
+outgrow the 10-turn window simply forget their oldest context.
 
 ## Hosts & secrets
 

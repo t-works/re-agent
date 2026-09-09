@@ -5,6 +5,7 @@
 // Memory layout:
 //   memory/sessions/session-list.json              [{ session-uuid }]
 //   memory/sessions/<session-uuid>/agent-tasks/<task-uuid>/{task,result}.json
+//   memory/conversations/<convId>/transcript.jsonl short-term Q/A log (lib/stm.ts)
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
@@ -15,6 +16,7 @@ import { runCommand } from '../tools/run-command';
 import { makeRunSshTool } from '../tools/ssh';
 import { wrapGuarded, type ApprovalRequest } from './guard';
 import { loadMemoryContext, MEMORY_WRITER_SYSTEM, writeMemoryTools } from './memory';
+import { appendTurn } from './stm';
 import cfg from '../conf/config';
 import policy from '../conf/guardrails';
 
@@ -36,16 +38,28 @@ export type Orchestrator = {
   finalize(sids?: string[]): Promise<TurnResult>;
 };
 
+/** Optional short-term-memory wiring: convId makes ask() append every turn to
+ * that conversation's transcript (lib/stm.ts); resumeContext — restored from a
+ * previous run's transcript by the front-end — rides in the system prompt so a
+ * restarted process keeps conversational context. Both are boot-time options; a
+ * bare createOrchestrator() stays STM-free (API front-ends opt in per run). */
+export type OrchestratorOpts = { convId?: string; resumeContext?: string };
+
 /**
  * Build an orchestrator. emit receives every loop/note event; confirm lets a
  * front-end answer approval requests (ask-gated commands) interactively — a
  * transport-free hook, the CLI implements it with readline, an API later with
  * an HTTP round-trip. Without confirm, ask-gated commands are auto-denied.
  */
-export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: ApprovalRequest) => Promise<boolean>): Orchestrator {
+export function createOrchestrator(
+  emit?: (e: TurnEvent) => void,
+  confirm?: (q: ApprovalRequest) => Promise<boolean>,
+  opts: OrchestratorOpts = {}
+): Orchestrator {
   const agents = loadRegistry();
   const roster = agents.map((a) => `- ${a.name}: ${a.description}`).join('\n');
-  const systemPrompt = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace('{agents}', roster || '- (none)');
+  const base = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace('{agents}', roster || '- (none)');
+  const systemPrompt = opts.resumeContext ? base + '\n\n' + opts.resumeContext : base;
 
   /** Hand a task to a sub-agent through the session mailbox (native structured args — no text parsing). */
   async function delegate(name: string, task: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
@@ -160,6 +174,13 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
         model: cfg.orchestratorModel,
         reasoningEffort: cfg.orchestratorReasoningEffort,
       });
+      // Short-term memory: log this turn so a restarted process can restore the
+      // conversation. Best-effort — a failed write must never fail the turn.
+      if (opts.convId) {
+        try {
+          appendTurn(opts.convId, { sid, q: question, output: result.output });
+        } catch { /* ignore */ }
+      }
       return { ...result, sid };
     },
 
