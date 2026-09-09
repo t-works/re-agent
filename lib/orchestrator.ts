@@ -14,6 +14,7 @@ import { reactLoop } from './react';
 import type { LoopEvent, Tool } from './react';
 import { runCommand } from '../tools/run-command';
 import { makeRunSshTool } from '../tools/ssh';
+import { POOL_NAMES } from '../tools/pool';
 import { wrapGuarded, type ApprovalRequest } from './guard';
 import { loadMemoryContext, MEMORY_WRITER_SYSTEM, writeMemoryTools } from './memory';
 import { appendTurn } from './stm';
@@ -21,7 +22,8 @@ import cfg from '../conf/config';
 import policy from '../conf/guardrails';
 
 const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
-const AGENTS_ROOT = join(SRC_ROOT, 'agents'); // every sub-agent lives in agents/<name>/
+const AGENTS_ROOT = join(SRC_ROOT, 'agents'); // hand-authored sub-agents (committed)
+const RUNTIME_AGENTS_ROOT = join(SRC_ROOT, 'runtime', 'agents'); // create_agent output (gitignored)
 const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
 
 export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean; model?: string; reasoningEffort?: string };
@@ -56,16 +58,25 @@ export function createOrchestrator(
   confirm?: (q: ApprovalRequest) => Promise<boolean>,
   opts: OrchestratorOpts = {}
 ): Orchestrator {
+  // Boot snapshot (returned to the front-end for its banner). The registry is
+  // re-scanned per ask() and per delegate call, so agents created mid-session
+  // (create_agent → runtime/agents/) are live without a restart.
   const agents = loadRegistry();
-  const roster = agents.map((a) => `- ${a.name}: ${a.description}`).join('\n');
-  const base = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace('{agents}', roster || '- (none)');
-  const systemPrompt = opts.resumeContext ? base + '\n\n' + opts.resumeContext : base;
+
+  /** Roster + full orchestrator system prompt, rebuilt from a fresh scan each turn. */
+  function buildSystemPrompt(): string {
+    const roster = loadRegistry().map((a) => `- ${a.name}: ${a.description}`).join('\n');
+    const base = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace('{agents}', roster || '- (none)');
+    return opts.resumeContext ? base + '\n\n' + opts.resumeContext : base;
+  }
 
   /** Hand a task to a sub-agent through the session mailbox (native structured args — no text parsing). */
   async function delegate(name: string, task: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
     if (!name || !task) return { ok: false, output: 'Usage: delegate with a name and a task' };
-    const agent = agents.find((a) => a.name === name);
-    if (!agent) return { ok: false, output: `Unknown agent: ${name}. Known: ${agents.map((a) => a.name).join(', ')}` };
+    // Fresh scan: an agent created earlier in this same turn must be delegatable now.
+    const agent = loadRegistry().find((a) => a.name === name);
+    if (!agent)
+      return { ok: false, output: `Unknown agent: ${name}. Known: ${loadRegistry().map((a) => a.name).join(', ')}` };
 
     const tid = randomUUID();
     const taskDir = join(sessionDir, 'agent-tasks', tid);
@@ -73,7 +84,12 @@ export function createOrchestrator(
     writeFileSync(
       join(taskDir, 'task.json'),
       JSON.stringify(
-        { id: tid, from: 'orchestrator', to: agent.name, task: task.trim(), ...(agent.model && { model: agent.model }), ...(agent.reasoningEffort && { reasoningEffort: agent.reasoningEffort }) },
+        {
+          id: tid, from: 'orchestrator', to: agent.name, task: task.trim(),
+          workspace: join(sessionDir, 'workspace'), // shared artifact dir for this session's agents
+          ...(agent.model && { model: agent.model }),
+          ...(agent.reasoningEffort && { reasoningEffort: agent.reasoningEffort }),
+        },
         null,
         2
       )
@@ -81,11 +97,16 @@ export function createOrchestrator(
 
     emit?.({ kind: 'note', content: `\n>>> delegating to ${agent.name} (mailbox: ${relative(SRC_ROOT, taskDir)}) <<<\n` });
 
+    // Compiled custom entry wins; data agents (agent.json with a tools list, no
+    // agent.ts) run on the shared generic runner — new agents need no per-agent build.
     const agentJs = join(__dirname, '..', agent.dir, 'agent.js');
+    const entryArgs = existsSync(agentJs)
+      ? [agentJs, taskDir]
+      : [join(__dirname, '..', 'runner.js'), join(SRC_ROOT, agent.dir), taskDir];
     await new Promise<void>((resolve) => {
       // Pipe the sub-agent's trace back through emit (instead of stdio inherit) so an
       // API front-end receives it as events rather than writing to server stdout.
-      const child = spawn(process.execPath, [agentJs, taskDir]);
+      const child = spawn(process.execPath, entryArgs);
       child.stdout.on('data', (d) => emit?.({ kind: 'note', content: d.toString() }));
       child.stderr.on('data', (d) => emit?.({ kind: 'note', content: d.toString() }));
 
@@ -138,15 +159,17 @@ export function createOrchestrator(
       const sid = randomUUID();
       const sessionDir = join(SESSIONS_ROOT, sid);
       mkdirSync(join(sessionDir, 'agent-tasks'), { recursive: true });
+      mkdirSync(join(sessionDir, 'workspace'), { recursive: true }); // artifact handoff dir for delegated agents
       const sessions = readJson<SessionEntry[]>(join(SESSIONS_ROOT, 'session-list.json'), []);
       sessions.push({ 'session-uuid': sid });
       writeFileSync(join(SESSIONS_ROOT, 'session-list.json'), JSON.stringify(sessions, null, 2));
       emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(SRC_ROOT, sessionDir)})\n` });
+      const systemPrompt = buildSystemPrompt(); // fresh roster each turn: created agents appear next turn
 
       const delegateTool: Tool = {
         name: 'delegate',
-        description: agents.length
-          ? `Hand a task to a specialist sub-agent and wait for its report. Agents:\n${roster}`
+        description: loadRegistry().length
+          ? `Hand a task to a specialist sub-agent and wait for its report.\nAgents:\n${loadRegistry().map((a) => `- ${a.name}: ${a.description}`).join('\n')}\n\nSession workspace — delegated agents exchange artifacts here via read_artifact/write_artifact. When one step's output feeds the next, have the first agent write it to a file and pass the next agent the path (keep payloads out of your context): ${join(sessionDir, 'workspace')}`
           : '(no sub-agents registered — never use this tool)',
         parameters: {
           type: 'object',
@@ -164,7 +187,56 @@ export function createOrchestrator(
       // way around it. Ask verdicts go to the human (auto-deny when no hook is wired).
       const ask = async (q: ApprovalRequest) => (confirm ? confirm(q) : false);
       const localRun = wrapGuarded(runCommand, ask);
-      const tools: Tool[] = [localRun, ...(runSsh ? [wrapGuarded(runSsh, ask)] : []), delegateTool];
+
+      // Meta: author a specialist agent (agent.json + system.txt data) that delegate()
+      // spawns on the shared runner — no per-agent build. Creating a new command-capable
+      // principal (persisted under runtime/agents/), so it passes the same human gate as
+      // ask-gated commands. Tool subset is privilege: validated against the pool below.
+      const createAgentTool: Tool = {
+        name: 'create_agent',
+        description:
+          `Create a new specialist sub-agent for this task, delegatable within the same turn. Choose it for a substantial specialist job no existing agent covers (a tailored system prompt + narrow tool subset) — never for one-off trivial steps you can run yourself, and never a duplicate of an existing agent's domain.\n` +
+          `- name: unique, lowercase letters/digits/hyphens.\n` +
+          `- description: one paragraph of its domain and job (shown in rosters).\n` +
+          `- systemPrompt: full operating instructions — identity, domain, job, working rules, boundaries. Model it on the hand-written sub-agents' prompts. State: no secrets in output; a DENIED tool result means the action did not happen — never rephrase or split to bypass it.\n` +
+          `- tools: subset of ${POOL_NAMES.join(', ')}. run_command/run_ssh are guardrailed automatically; view_image needs a vision model (set model, e.g. deepseek-v4-flash-vision-exp); read_artifact/write_artifact exchange files in the session workspace.\n` +
+          `- hasMemory: true only if it should carry durable notes across sessions.\n` +
+          `Creation pauses for the user's approval. Created agents persist under runtime/agents/ and stay usable after a restart.`,
+        parameters: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'unique agent name (a-z0-9-), the delegate handle' },
+            description: { type: 'string', description: 'one-paragraph domain/job summary (roster text)' },
+            systemPrompt: { type: 'string', description: 'the agent\'s full system prompt' },
+            tools: { type: 'array', items: { type: 'string' }, description: `subset of: ${POOL_NAMES.join(', ')} (omit for a pure reasoning agent)` },
+            hasMemory: { type: 'boolean', description: 'durable notes across sessions (default false)' },
+            model: { type: 'string', description: 'model override (only needed for view_image work)' },
+          },
+          required: ['name', 'description', 'systemPrompt'],
+        },
+        run: async (args) => {
+          const v = validateAgentSpec(args as CreateAgentSpec);
+          if (!v.ok) return { ok: false, output: v.error };
+          if (loadRegistry().some((a) => a.name === v.validated.json.name))
+            return { ok: false, output: `An agent named "${v.validated.json.name}" already exists — reuse it or pick another name.` };
+          const dir = join(RUNTIME_AGENTS_ROOT, v.validated.json.name);
+          const approved = await ask({
+            tool: 'create_agent',
+            command: `create agent "${v.validated.json.name}" (tools: ${v.validated.json.tools.join(', ') || 'none'})`,
+            reason: 'creates a new sub-agent under runtime/agents/ — inspect after the session',
+          });
+          if (!approved) return { ok: false, output: 'DENIED by user approval: no agent created' };
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(join(dir, 'agent.json'), JSON.stringify(v.validated.json, null, 2));
+          writeFileSync(join(dir, 'system.txt'), v.validated.systemPrompt.trimEnd() + '\n');
+          return {
+            ok: true,
+            output: `Agent "${v.validated.json.name}" created (${relative(SRC_ROOT, dir)}). Delegate to it now with delegate(name: "${v.validated.json.name}", ...).`,
+          };
+        },
+      };
+
+      const tools: Tool[] = [localRun, ...(runSsh ? [wrapGuarded(runSsh, ask)] : []), delegateTool, createAgentTool];
 
       const result = await reactLoop({
         systemPrompt,
@@ -191,7 +263,7 @@ export function createOrchestrator(
      * Synthetic by design — durable facts only, never raw per-delegate noise.
      */
     async finalize(sids?: string[]): Promise<TurnResult> {
-      const writers = agents.filter((a) => a.hasMemory);
+      const writers = loadRegistry().filter((a) => a.hasMemory); // fresh scan: includes runtime-created memory agents
       if (!writers.length) return { ok: true, output: 'no hasMemory agents registered', log: [], sid: '' };
       const sessions = sids ?? readJson<SessionEntry[]>(join(SESSIONS_ROOT, 'session-list.json'), []).map((s) => s['session-uuid']);
       const perAgent = collectTranscripts(sessions);
@@ -216,33 +288,94 @@ export function createOrchestrator(
   };
 }
 
-/** Scan agents/ for dirs containing agent.json, returning one AgentDef per sub-agent. */
+/**
+ * Scan agents/ (committed, hand-authored) + runtime/agents/ (created by
+ * create_agent, gitignored) for dirs containing agent.json. agents/ wins on a
+ * name collision (committed source is authoritative).
+ */
 function loadRegistry(): AgentDef[] {
-  if (!existsSync(AGENTS_ROOT)) return [];
-  return readdirSync(AGENTS_ROOT, { withFileTypes: true })
+  const entries = [AGENTS_ROOT, RUNTIME_AGENTS_ROOT].flatMap(scanRoot);
+  const seen = new Set<string>();
+  return entries.filter((a) => (seen.has(a.name) ? false : (seen.add(a.name), true)));
+}
+
+function scanRoot(root: string): AgentDef[] {
+  if (!existsSync(root)) return [];
+  return readdirSync(root, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .flatMap((d) => {
-      const metaFile = join(AGENTS_ROOT, d.name, 'agent.json');
+      const metaFile = join(root, d.name, 'agent.json');
       if (!existsSync(metaFile)) return [];
       const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as {
         name?: string;
         description?: string;
         hasMemory?: boolean;
-        model?: string;        // optional per-agent model override (e.g. deepseek-v4-flash-vision-exp)
+        model?: string; // optional per-agent model override (e.g. deepseek-v4-flash-vision-exp)
         reasoningEffort?: string;
       };
-      // dir is project-root-relative (dist mirrors it: dist/agents/<name>/agent.js).
+      // dir is project-root-relative: dist mirrors agents/ (dist/agents/<name>/agent.js for
+      // custom entries); data agents have no dist copy and run on the shared runner instead.
       return [
         {
           name: meta.name ?? d.name,
           description: meta.description ?? '',
-          dir: join('agents', d.name),
+          dir: relative(SRC_ROOT, join(root, d.name)),
           hasMemory: meta.hasMemory === true,
           ...(meta.model && { model: meta.model }),
           ...(meta.reasoningEffort && { reasoningEffort: meta.reasoningEffort }),
         },
       ];
     });
+}
+
+// ---- create_agent spec validation (pure — smoke-testable offline) ----
+export type CreateAgentSpec = {
+  name?: unknown;
+  description?: unknown;
+  systemPrompt?: unknown;
+  tools?: unknown;
+  hasMemory?: unknown;
+  model?: unknown;
+};
+
+export type AgentJson = {
+  name: string;
+  description: string;
+  tools: string[];
+  hasMemory?: boolean;
+  model?: string;
+};
+
+export type ValidatedAgentSpec = { json: AgentJson; systemPrompt: string };
+
+/** Format-level checks for create_agent: name charset, tool subset, size caps. */
+export function validateAgentSpec(
+  spec: CreateAgentSpec
+): { ok: true; validated: ValidatedAgentSpec } | { ok: false; error: string } {
+  const name = String(spec.name ?? '').trim();
+  const description = String(spec.description ?? '').trim();
+  const systemPrompt = String(spec.systemPrompt ?? '').trim();
+  const tools = Array.isArray(spec.tools) ? spec.tools.map((t) => String(t).trim()).filter(Boolean) : [];
+  const hasMemory = spec.hasMemory === true;
+  const model = spec.model ? String(spec.model).trim() : '';
+  if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(name))
+    return { ok: false, error: `invalid name "${name}" — use 1-32 chars of [a-z0-9-], starting alphanumeric` };
+  if (!description) return { ok: false, error: 'description is required (shown in the roster)' };
+  if (description.length > 600) return { ok: false, error: `description too long (${description.length} > 600)` };
+  if (!systemPrompt) return { ok: false, error: 'systemPrompt is required' };
+  if (systemPrompt.length > 4000) return { ok: false, error: `systemPrompt too long (${systemPrompt.length} > 4000)` };
+  for (const t of tools)
+    if (!(POOL_NAMES as readonly string[]).includes(t))
+      return { ok: false, error: `unknown tool "${t}" — pool: ${POOL_NAMES.join(', ')}` };
+  if (model.length > 80) return { ok: false, error: 'model too long' };
+  const json: AgentJson = {
+    name,
+    description,
+    tools,
+    ...(hasMemory ? { hasMemory: true } : {}),
+    ...(model ? { model } : {}),
+  };
+  return { ok: true, validated: { json, systemPrompt } };
 }
 
 /** Read and parse a JSON file, returning fallback if missing or corrupt. */

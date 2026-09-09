@@ -8,16 +8,18 @@ If something related to this doc changes as project evolves update this document
 A minimal TypeScript multi-agent framework on the DeepSeek Responses API.
 One **orchestrator** ReAct loop answers each user turn; it can run local shell
 commands, SSH to remote hosts, and `delegate` tasks to **sub-agents** (separate
-directories with `agent.json`). Stateless per turn: sessions are JSON mailboxes
-on disk, sub-agents are spawned child node processes.
+source dirs with `agent.json`), or author new specialist agents at runtime with
+`create_agent`. Stateless per turn: sessions are JSON mailboxes on disk,
+sub-agents are spawned child node processes.
 
 ## Layout
 
 ```
 agent.ts                 CLI front-end: readline ⇄ createOrchestrator()
+runner.ts                generic data-agent entry (agent.json tools list → dist/runner.js)
 system.txt               orchestrator system prompt (has {agents} placeholder)
 lib/react.ts             shared ReAct loop over the Responses API (stateless)
-lib/orchestrator.ts      turn orchestration, delegate() (mailbox spawn), finalize()
+lib/orchestrator.ts      turn orchestration, delegate() (mailbox spawn), create_agent, finalize()
 lib/guard.ts             guardrail classification + approval gates (deny/ask)
 lib/memory.ts            hub-and-spoke memory store, tools, memoryWriter prompt
 lib/stm.ts               short-term conversation transcript (restart continuity)
@@ -27,12 +29,16 @@ conf/guardrails.ts       deny/ask command policy (edit freely)
 tools/run-command.ts     run_command tool (local shell)
 tools/ssh.ts             run_ssh tool (plink → conf/ssh-hosts.ts)
 tools/view-image.ts      view_image tool (local image → vision model input)
+tools/artifact.ts        read/write_artifact tools (workspace file handoffs)
+tools/pool.ts            data-agent tool pool: POOL_NAMES + buildAgentTools
 agents/<SUB-AGENT>/     one dir per sub-agent, e.g. agents/CONFIG-EDITOR/
-  agent.json             { name, description, hasMemory, model?, reasoningEffort? }
+  agent.json             { name, description, hasMemory, tools?, model?, reasoningEffort? }
   system.txt             that agent's system prompt
   agent.ts               entry; compiled to dist/agents/<SUB-AGENT>/agent.js
-memory/                  GITIGNORED: sessions/ (mailboxes) + agents/ (KB notes)
-                         + conversations/ (short-term transcripts, lib/stm.ts)
+                         (absent + tools list = data agent → runs on runner.ts)
+runtime/agents/          GITIGNORED: agents created at runtime via create_agent
+memory/                  GITIGNORED: sessions/ (mailboxes + per-session workspace/)
+                         + agents/ (KB notes) + conversations/ (short-term transcripts, lib/stm.ts)
 docs/feat/               future-feature descriptions (write when deferring)
 smoke.js                 `npm run smoke` = build + off-line assertions
 ```
@@ -61,21 +67,40 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   output, not exceptions).
 - **reactLoop** is stateless: full history rides in `input` every request.
   Tools are re-registered per turn.
-- **Sub-agent contract**: orchestrator spawns `node dist/agents/<DIR>/agent.js
-  <taskDir>` where `<taskDir>` = `memory/sessions/<sid>/agent-tasks/<tid>/`.
-  Child reads `task.json` ({ id, from, to, task, model?, reasoningEffort? })
-  via `lib/task.ts`, runs its own reactLoop, writes `result.json`
-  ({ id, from, ok, output, log }) via lib/task.ts, exits 0/1. Traces are
-  piped to the user as raw stdout — don't print secrets.
-- **Registry**: any dir under `agents/` with `agent.json` is a sub-agent.
-  Fields:
-  `name` (delegate handle), `description` (shown to the orchestrator model),
-  `hasMemory: true` to opt into memory, optional `model`/`reasoningEffort`
-  (per-agent model override — e.g. `agents/VISION/agent.json` declares
-  `deepseek-v4-flash-vision-exp`). The fields ride task.json to the spawned
-  entry, which passes them to reactLoop; absent fields fall back to cfg
-  defaults, so plain agents are untouched. A sub-agent assembles its OWN
-  toolset in its agent.ts (shared builders from lib/ and tools/).
+- **Sub-agent contract**: the orchestrator spawns a compiled entry per agent.
+  Custom entries (`agents/<DIR>/agent.ts` → `dist/agents/<DIR>/agent.js`) keep
+  a hand-authored toolset; data agents (`agent.json` with a `tools` list, no
+  agent.ts — e.g. anything `create_agent` makes) run the shared `runner.ts`
+  instead, which derives tools + prompt from agent.json + system.txt. Args:
+  custom `node dist/agents/<DIR>/agent.js <taskDir>`, data `node dist/runner.js
+  <agentSrcDir> <taskDir>`; `<taskDir>` = `memory/sessions/<sid>/agent-tasks/<tid>/`.
+  Child reads `task.json` ({ id, from, to, task, workspace?, model?,
+  reasoningEffort? }) via `lib/task.ts`, runs its own reactLoop, writes
+  `result.json` ({ id, from, ok, output, log }) via lib/task.ts, exits 0/1.
+  Traces are piped to the user as raw stdout — don't print secrets.
+  `workspace` points at the per-session artifact dir (`memory/sessions/<sid>/workspace/`):
+  agents hand each other files there with read_artifact/write_artifact so
+  payloads don't round-trip through the orchestrator's context.
+- **Registry**: any dir under `agents/` (committed) **or `runtime/agents/`**
+  (created by `create_agent`, gitignored) with `agent.json` is a sub-agent;
+  `agents/` wins on a name collision. Fields: `name` (delegate handle),
+  `description` (shown to the orchestrator model), `hasMemory: true` to opt
+  into memory, optional `model`/`reasoningEffort` (per-agent model override —
+  e.g. `agents/VISION/agent.json` declares `deepseek-v4-flash-vision-exp`),
+  and `tools: string[]` for data agents (pool in tools/pool.ts: run_command,
+  run_ssh, view_image, read_artifact, write_artifact; memory read_spoke comes
+  free with hasMemory). Re-scanned per turn and per delegate call — agents
+  created mid-session are live without a restart. Fields ride task.json to the
+  spawned entry, which passes them to reactLoop; absent fields fall back to
+  cfg defaults, so plain agents are untouched.
+- **Dynamic agents**: the orchestrator authors new specialists at runtime via
+  `create_agent` (writes agent.json + system.txt under runtime/agents/, after
+  the human approval gate — a new command-capable principal), then delegates
+  to them in the same turn; they run on runner.ts (no per-agent build).
+  Lifecycle: created agents persist on disk across `restart` (the registry is
+  re-scanned at boot); nothing auto-cleans them yet (ponytail: stale rosters
+  are the ceiling — add deletion when it bites). Growth ideas (async fan-out,
+  peer messaging, multi-turn task state) live in docs/feat/agent-teams.md.
 
 ## Guardrails & approvals (security-sensitive — read before changing)
 
@@ -88,7 +113,10 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   `answer.json` (`makeMailboxAsker`); orchestrator `delegate()` polls the same
   dir, relays to the front-end `confirm` hook, writes the answer. No hook =
   safe auto-deny. Stale answers are cleared before each ask (the answer file
-  is READ, then deleted — order matters).
+  is READ, then deleted — order matters). `create_agent` rides the same gate:
+  making a new command-capable principal pauses for approval (no hook =
+  auto-deny), because its tool subset is privilege — validated against the
+  pool (tools/pool.ts) before anything is written.
 - Never instruct a model to bypass a DENIED result; both system.txt files say
   so. User typing in approvals: `rl.question` on the CLI's single readline is
   safe because no question is pending mid-turn.
@@ -124,6 +152,21 @@ stays on disk. `restart` finalizes this process's long-term memory, re-execs
 with `--resume <convId>` (detached, inherited stdio), and exits. Raw + rolling
 on purpose: compaction into summaries is future work, and conversations that
 outgrow the 10-turn window simply forget their oldest context.
+
+## Dynamic agents & artifact handoffs
+
+- `create_agent` (orchestrator tool) authors a specialist: unique name,
+  description, full system.txt, tool subset from the pool, optional
+  hasMemory/model. Writes runtime/agents/<name>/ + system.txt after a confirm
+  gate; delegate() can target it the same turn (runner.ts spawn, no build).
+  Agent prompt hygiene is advisory — real enforcement is the tool-level
+  guardrails the pool wraps in, so a model-authored prompt can't widen access.
+- Workspace handoffs: every delegation carries the session workspace path
+  (task.json `workspace`); agents with read_artifact/write_artifact exchange
+  deliverables there. The orchestrator relays paths, not payloads — its
+  context grows with delegations, not with the content flowing between agents.
+- Tool subset = privilege, one level deep only: sub-agents never get
+  create_agent/delegate, so creation can't recurse.
 
 ## Hosts & secrets
 

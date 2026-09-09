@@ -11,6 +11,7 @@ export type SubTask = {
   from?: string;
   to?: string;
   task: string;
+  workspace?: string; // shared artifact dir (memory/sessions/<sid>/workspace) for file handoffs
   model?: string;
   reasoningEffort?: string;
 };

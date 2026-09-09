@@ -15,6 +15,8 @@ export default {
   // orchestratorReasoningEffort: process.env.DEEPSEEK_ORCHESTRATOR_REASONING_EFFORT || 'high',
   orchestratorReasoningEffort: 'high',
 
-  maxOutputTokens: 1000000,
+  // API-per-model cap (deepseek-v4-flash rejects > 393216 today); env-overridable
+  // for models with a higher ceiling.
+  maxOutputTokens: Number(process.env.DEEPSEEK_MAX_OUTPUT_TOKENS) || 393216,
   maxIterations: 130,
 };

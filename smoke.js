@@ -89,7 +89,7 @@ const echoTool = {
 
   // --- 4) Guardrail classification: deny/ask/allow; ask rules are ssh-scoped ---
   const { classifyCommand, wrapGuarded, makeMailboxAsker } = require('./dist/lib/guard');
-  const { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } = require('fs');
+  const { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } = require('fs');
   const { tmpdir } = require('os');
   const { join } = require('path');
   assert.strictEqual(classifyCommand('rm -rf /', 'run_ssh'), 'deny');
@@ -218,6 +218,78 @@ const echoTool = {
   assert.strictEqual(stm.lastConvId(), conv, 'last pointer must roundtrip');
   rmSync(join(convRoot, conv), { recursive: true, force: true });
   if (priorLast) stm.rememberLast(priorLast); else rmSync(join(convRoot, 'last.txt'), { force: true });
+
+  // --- 12) Workspace artifact tools: roundtrip, subdirs, escape rejection ---
+  const { makeArtifactTools } = require('./dist/tools/artifact');
+  const wsDir = mkdtempSync(join(tmpdir(), 'ws-'));
+  const art = Object.fromEntries(makeArtifactTools(wsDir).map((t) => [t.name, t]));
+  assert.ok(art.write_artifact && art.read_artifact, 'workspace must expose write_artifact + read_artifact');
+  const aw1 = await art.write_artifact.run({ path: 'step1/report.md', content: '# done\n- ok' });
+  assert.strictEqual(aw1.ok, true);
+  assert.ok(aw1.output.includes('step1/report.md'));
+  const ar1 = await art.read_artifact.run({ path: 'step1/report.md' });
+  assert.strictEqual(ar1.ok, true);
+  assert.ok(ar1.output.includes('done'), 'roundtrip content must match');
+  const esc1 = await art.read_artifact.run({ path: '../secret.txt' });
+  assert.strictEqual(esc1.ok, false);
+  assert.ok(esc1.output.includes('workspace'), '.. escape must be rejected');
+  assert.strictEqual((await art.read_artifact.run({ path: '/etc/hosts' })).ok, false, 'absolute paths must be rejected');
+  assert.strictEqual((await art.write_artifact.run({ path: 'C:/evil.txt', content: 'x' })).ok, false, 'drive paths must be rejected');
+  const miss = await art.read_artifact.run({ path: 'nope.md' });
+  assert.strictEqual(miss.ok, false);
+  assert.ok(miss.output.includes('step1/report.md'), 'missing-artifact error must list available files');
+  const escW1 = await art.write_artifact.run({ path: '../../evil.txt', content: 'x' });
+  assert.strictEqual(escW1.ok, false, 'write must reject escapes too');
+  rmSync(wsDir, { recursive: true, force: true });
+
+  // --- 13) Data-agent pool wiring: guardrailed commands, memory opt-in, no fabricated ssh ---
+  const { buildAgentTools, POOL_NAMES } = require('./dist/tools/pool');
+  assert.deepStrictEqual(POOL_NAMES, ['run_command', 'run_ssh', 'view_image', 'read_artifact', 'write_artifact']);
+  const ws2 = mkdtempSync(join(tmpdir(), 'ws2-'));
+  const pt = Object.fromEntries(
+    buildAgentTools({ name: 't', tools: ['run_command', 'view_image', 'read_artifact', 'write_artifact'], workspace: ws2, ask: async () => true }).map((t) => [t.name, t])
+  );
+  assert.ok(pt.run_command && pt.view_image && pt.read_artifact && pt.write_artifact, 'requested pool tools must be built');
+  const pden = await pt.run_command.run({ command: 'rm -rf /' });
+  assert.strictEqual(pden.ok, false);
+  assert.ok(pden.output.includes('DENIED'), 'pool command tools must be guardrailed');
+  const withMem = Object.fromEntries(buildAgentTools({ name: 'tmem', tools: [], hasMemory: true, ask: async () => false }).map((t) => [t.name, t]));
+  assert.ok(withMem.read_spoke, 'hasMemory must add read_spoke');
+  const noSsh = buildAgentTools({ name: 'n', tools: ['run_ssh'], ask: async () => true });
+  if (!process.env['WARSZAWA-SMALL-HOST'])
+    assert.strictEqual(noSsh.length, 0, 'run_ssh requested without configured hosts must be omitted, not fabricated');
+  rmSync(ws2, { recursive: true, force: true });
+
+  // --- 14) create_agent spec validation (pure, offline) ---
+  const { validateAgentSpec } = require('./dist/lib/orchestrator');
+  assert.strictEqual(validateAgentSpec({ name: 'Bad Name', description: 'd', systemPrompt: 'p' }).ok, false, 'name charset must be enforced');
+  assert.strictEqual(validateAgentSpec({ name: 'ok', description: '', systemPrompt: 'p' }).ok, false, 'description is required');
+  assert.strictEqual(validateAgentSpec({ name: 'ok', description: 'd', systemPrompt: '' }).ok, false, 'systemPrompt is required');
+  assert.strictEqual(validateAgentSpec({ name: 'ok', description: 'd', systemPrompt: 'p', tools: ['not_a_tool'] }).ok, false, 'tool subset must be enforced');
+  assert.strictEqual(validateAgentSpec({ name: 'ok', description: 'd', systemPrompt: 'p', tools: ['read_spoke'] }).ok, false, 'memory tools are not pool tools (hasMemory adds them)');
+  const goodSpec = validateAgentSpec({ name: 'analyst', description: 'reviews things', systemPrompt: 'You are analyst.', tools: ['read_artifact', 'write_artifact'], hasMemory: true, model: 'deepseek-v4-flash' });
+  assert.strictEqual(goodSpec.ok, true);
+  assert.deepStrictEqual(goodSpec.validated.json, { name: 'analyst', description: 'reviews things', tools: ['read_artifact', 'write_artifact'], hasMemory: true, model: 'deepseek-v4-flash' });
+  const bareSpec = validateAgentSpec({ name: 'thinker', description: 'd', systemPrompt: 'p' });
+  assert.strictEqual(bareSpec.ok, true);
+  assert.deepStrictEqual(bareSpec.validated.json.tools, [], 'absent tools must default to []');
+
+  // --- 15) runtime/agents registry: created agents register without a restart ---
+  const runtimeRoot = join(__dirname, 'runtime', 'agents');
+  rmSync(runtimeRoot, { recursive: true, force: true }); // deterministic: no leftovers from crashed runs
+  const rdir = join(runtimeRoot, 'smoke-runtime-agent');
+  mkdirSync(rdir, { recursive: true });
+  writeFileSync(join(rdir, 'agent.json'), JSON.stringify({ name: 'smoke-runtime-agent', description: 'runtime registry test', tools: ['read_artifact', 'write_artifact'] }, null, 2));
+  writeFileSync(join(rdir, 'system.txt'), 'You are a smoke-test agent.');
+  const orch2 = createOrchestrator();
+  const rra = orch2.agents.find((a) => a.name === 'smoke-runtime-agent');
+  assert.ok(rra, 'runtime/agents entries must appear in the registry');
+  assert.strictEqual(rra.hasMemory, false);
+  assert.ok(rra.dir.replace(/\\/g, '/').startsWith('runtime/'), 'runtime agents must keep their project-relative dir');
+  rmSync(rdir, { recursive: true, force: true });
+  rmSync(runtimeRoot, { recursive: true, force: true });
+  const orch3 = createOrchestrator();
+  assert.ok(!orch3.agents.find((a) => a.name === 'smoke-runtime-agent'), 'removed runtime agents must drop out');
 
   console.log(`smoke ok — core silent, ${orch.agents.length} sub-agents registered`);
   console.log(`  agents: ${orch.agents.map((a) => `${a.name}${a.hasMemory ? ' (memory)' : ''}`).join(', ')}`);
