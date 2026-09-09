@@ -22,7 +22,7 @@ const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
 const AGENTS_ROOT = join(SRC_ROOT, 'agents'); // every sub-agent lives in agents/<name>/
 const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
 
-export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean };
+export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean; model?: string; reasoningEffort?: string };
 type SessionEntry = { 'session-uuid': string };
 
 // Loop events plus pre-formatted side notes (session banner, sub-agent trace).
@@ -58,7 +58,11 @@ export function createOrchestrator(emit?: (e: TurnEvent) => void, confirm?: (q: 
     mkdirSync(taskDir, { recursive: true });
     writeFileSync(
       join(taskDir, 'task.json'),
-      JSON.stringify({ id: tid, from: 'orchestrator', to: agent.name, task: task.trim() }, null, 2)
+      JSON.stringify(
+        { id: tid, from: 'orchestrator', to: agent.name, task: task.trim(), ...(agent.model && { model: agent.model }), ...(agent.reasoningEffort && { reasoningEffort: agent.reasoningEffort }) },
+        null,
+        2
+      )
     );
 
     emit?.({ kind: 'note', content: `\n>>> delegating to ${agent.name} (mailbox: ${relative(SRC_ROOT, taskDir)}) <<<\n` });
@@ -199,9 +203,24 @@ function loadRegistry(): AgentDef[] {
     .flatMap((d) => {
       const metaFile = join(AGENTS_ROOT, d.name, 'agent.json');
       if (!existsSync(metaFile)) return [];
-      const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as { name?: string; description?: string; hasMemory?: boolean };
+      const meta = JSON.parse(readFileSync(metaFile, 'utf8')) as {
+        name?: string;
+        description?: string;
+        hasMemory?: boolean;
+        model?: string;        // optional per-agent model override (e.g. deepseek-v4-flash-vision-exp)
+        reasoningEffort?: string;
+      };
       // dir is project-root-relative (dist mirrors it: dist/agents/<name>/agent.js).
-      return [{ name: meta.name ?? d.name, description: meta.description ?? '', dir: join('agents', d.name), hasMemory: meta.hasMemory === true }];
+      return [
+        {
+          name: meta.name ?? d.name,
+          description: meta.description ?? '',
+          dir: join('agents', d.name),
+          hasMemory: meta.hasMemory === true,
+          ...(meta.model && { model: meta.model }),
+          ...(meta.reasoningEffort && { reasoningEffort: meta.reasoningEffort }),
+        },
+      ];
     });
 }
 

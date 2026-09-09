@@ -7,12 +7,13 @@
 // are read on demand with read_spoke (never written here — the end-of-session
 // memoryWriter owns the knowledge base).
 import { basename, join } from 'path';
-import { readFileSync, writeFileSync } from 'fs';
+import { readFileSync } from 'fs';
 import cfg from '../../conf/config';
 import { reactLoop, printLoopEvent } from '../../lib/react';
 import type { Tool } from '../../lib/react';
 import { makeMailboxAsker, wrapGuarded } from '../../lib/guard';
 import { readMemoryTools, memoryHubSection } from '../../lib/memory';
+import { readTask, writeResult } from '../../lib/task';
 import { runCommand } from '../../tools/run-command';
 import { makeRunSshTool } from '../../tools/ssh';
 
@@ -24,15 +25,18 @@ const MY_DIR = join(SRC_ROOT, 'agents', basename(__dirname)); // source dir of t
 async function main() {
   const taskDir = process.argv[2];
   if (!taskDir) { console.error('Usage: node agent.js <taskDir containing task.json>'); process.exit(1); }
-  const task = JSON.parse(readFileSync(join(taskDir, 'task.json'), 'utf8')) as { id: string; task: string };
+  const task = readTask(taskDir);
   const meta = JSON.parse(readFileSync(join(MY_DIR, 'agent.json'), 'utf8')) as { name: string; hasMemory?: boolean };
 
   const runSsh = makeRunSshTool();
   if (!runSsh) {
-    writeFileSync(
-      join(taskDir, 'result.json'),
-      JSON.stringify({ id: task.id, from: meta.name, ok: false, output: 'No SSH hosts configured (conf/ssh-hosts.ts) — config-editor has nothing to manage.', log: [] }, null, 2)
-    );
+    writeResult(taskDir, {
+      id: task.id,
+      from: meta.name,
+      ok: false,
+      output: 'No SSH hosts configured (conf/ssh-hosts.ts) — config-editor has nothing to manage.',
+      log: [],
+    });
     process.exit(1);
   }
 
@@ -48,11 +52,16 @@ async function main() {
   const systemPrompt =
     readFileSync(join(MY_DIR, 'system.txt'), 'utf8') + (meta.hasMemory ? memoryHubSection(meta.name) : '');
 
-  const result = await reactLoop({ systemPrompt, task: task.task, tools, onEvent: printLoopEvent });
-  writeFileSync(
-    join(taskDir, 'result.json'),
-    JSON.stringify({ id: task.id, from: meta.name, ok: result.ok, output: result.output, log: result.log }, null, 2)
-  );
+  // Per-agent model comes from agent.json via task.json (reactLoop falls back to cfg defaults when absent).
+  const result = await reactLoop({
+    systemPrompt,
+    task: task.task,
+    tools,
+    onEvent: printLoopEvent,
+    model: task.model,
+    reasoningEffort: task.reasoningEffort,
+  });
+  writeResult(taskDir, { id: task.id, from: meta.name, ok: result.ok, output: result.output, log: result.log });
   process.exit(result.ok ? 0 : 1);
 }
 

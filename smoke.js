@@ -78,13 +78,18 @@ const echoTool = {
   const ce = orch.agents.find((a) => a.name === 'config-editor');
   assert.ok(ce, 'config-editor must be registered');
   assert.strictEqual(ce.hasMemory, true, 'config-editor hasMemory flag must be picked up from agent.json');
+  const vision = orch.agents.find((a) => a.name === 'vision');
+  assert.ok(vision, 'vision must be registered');
+  assert.strictEqual(vision.model, 'deepseek-v4-flash-vision-exp', 'agent.json model field must reach the registry');
+  assert.strictEqual(vision.hasMemory, false, 'vision opts out of memory');
+  assert.strictEqual(ce.model, undefined, 'agents without a model field must not fabricate one');
 
   console.log = clog;
   assert.strictEqual(printed, 0, 'core must not print to stdout');
 
   // --- 4) Guardrail classification: deny/ask/allow; ask rules are ssh-scoped ---
   const { classifyCommand, wrapGuarded, makeMailboxAsker } = require('./dist/lib/guard');
-  const { mkdtempSync, rmSync, writeFileSync, existsSync } = require('fs');
+  const { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } = require('fs');
   const { tmpdir } = require('os');
   const { join } = require('path');
   assert.strictEqual(classifyCommand('rm -rf /', 'run_ssh'), 'deny');
@@ -148,6 +153,50 @@ const echoTool = {
   await wt.write_spoke.run({ spoke: 'hosts', content: '  ' }); // empty content deletes
   assert.strictEqual(existsSync(join(dir, 'hosts.md')), false, 'empty content must delete the spoke');
   rmSync(dir, { recursive: true, force: true });
+
+  // --- 8) Per-agent model plumbing: task.json carries the agent.json model ---
+  const { readTask, writeResult } = require('./dist/lib/task');
+  const tbox = mkdtempSync(join(tmpdir(), 'taskbox-'));
+  writeFileSync(join(tbox, 'task.json'), JSON.stringify({ id: 't1', to: 'vision', task: 'look', model: 'deepseek-v4-flash-vision-exp' }, null, 2));
+  assert.deepStrictEqual(readTask(tbox), { id: 't1', to: 'vision', task: 'look', model: 'deepseek-v4-flash-vision-exp' });
+  const plain = mkdtempSync(join(tmpdir(), 'taskbox-'));
+  writeFileSync(join(plain, 'task.json'), JSON.stringify({ id: 't2', task: 'x' }, null, 2));
+  assert.strictEqual(readTask(plain).model, undefined, 'absent model must stay absent');
+  writeResult(tbox, { id: 't1', from: 'vision', ok: true, output: 'y', log: [] });
+  assert.strictEqual(JSON.parse(readFileSync(join(tbox, 'result.json'), 'utf8')).ok, true);
+
+  // --- 9) Tool output serialization: text stays a string; images become content parts ---
+  const { toolOutputParts } = require('./dist/lib/react');
+  assert.strictEqual(toolOutputParts({ ok: true, output: 'x' }), 'x');
+  assert.strictEqual(toolOutputParts({ ok: false, output: 'boom' }), 'ERROR: boom');
+  assert.deepStrictEqual(toolOutputParts({ ok: true, output: 'sent', image: { url: 'data:image/png;base64,QQ==', detail: 'low' } }), [
+    { type: 'input_text', text: 'sent' },
+    { type: 'input_image', image_url: 'data:image/png;base64,QQ==', detail: 'low' },
+  ]);
+  assert.deepStrictEqual(toolOutputParts({ ok: true, output: '', image: { url: 'data:image/jpeg;base64,QQ==' } }), [
+    { type: 'input_image', image_url: 'data:image/jpeg;base64,QQ==' },
+  ]);
+
+  // --- 10) view_image: magic-byte sniffing + a real file roundtrip (no API) ---
+  const { viewImage, detectImageMime } = require('./dist/tools/view-image');
+  assert.strictEqual(detectImageMime(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])), 'image/png');
+  assert.strictEqual(detectImageMime(Buffer.from('RIFF\x00\x00\x00\x00WEBPVP8 ', 'binary')), 'image/webp');
+  assert.strictEqual(detectImageMime(Buffer.from('not an image')), null);
+  const idir = mkdtempSync(join(tmpdir(), 'img-'));
+  const pngPath = join(idir, 'shot.png');
+  writeFileSync(pngPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]));
+  const vi = await viewImage.run({ path: pngPath });
+  assert.strictEqual(vi.ok, true);
+  assert.ok(vi.image, 'image result must carry an image ref');
+  assert.ok(vi.image.url.startsWith('data:image/png;base64,'), 'png must come back as a base64 data-url');
+  writeFileSync(join(idir, 'x.txt'), 'plain text');
+  const txt = await viewImage.run({ path: join(idir, 'x.txt') });
+  assert.strictEqual(txt.ok, false);
+  assert.ok(txt.output.includes('not a supported image'));
+  const gone = await viewImage.run({ path: join(idir, 'nope.png') });
+  assert.strictEqual(gone.ok, false);
+  assert.ok(gone.output.includes('Cannot read'));
+  rmSync(idir, { recursive: true, force: true });
 
   console.log(`smoke ok — core silent, ${orch.agents.length} sub-agents registered`);
   console.log(`  agents: ${orch.agents.map((a) => `${a.name}${a.hasMemory ? ' (memory)' : ''}`).join(', ')}`);

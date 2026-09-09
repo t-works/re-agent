@@ -25,8 +25,9 @@ conf/ssh-hosts.ts        SSH hosts; secrets = env var NAMES, never values
 conf/guardrails.ts       deny/ask command policy (edit freely)
 tools/run-command.ts     run_command tool (local shell)
 tools/ssh.ts             run_ssh tool (plink → conf/ssh-hosts.ts)
+tools/view-image.ts      view_image tool (local image → vision model input)
 agents/<SUB-AGENT>/     one dir per sub-agent, e.g. agents/CONFIG-EDITOR/
-  agent.json             { name, description, hasMemory }
+  agent.json             { name, description, hasMemory, model?, reasoningEffort? }
   system.txt             that agent's system prompt
   agent.ts               entry; compiled to dist/agents/<SUB-AGENT>/agent.js
 memory/                  GITIGNORED: sessions/ (mailboxes) + agents/ (KB notes)
@@ -56,14 +57,19 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   Tools are re-registered per turn.
 - **Sub-agent contract**: orchestrator spawns `node dist/agents/<DIR>/agent.js
   <taskDir>` where `<taskDir>` = `memory/sessions/<sid>/agent-tasks/<tid>/`.
-  Child reads `task.json` ({ id, from, to, task }), runs its own reactLoop,
-  writes `result.json` ({ id, from, ok, output, log }), exits 0/1. Traces are
+  Child reads `task.json` ({ id, from, to, task, model?, reasoningEffort? })
+  via `lib/task.ts`, runs its own reactLoop, writes `result.json`
+  ({ id, from, ok, output, log }) via lib/task.ts, exits 0/1. Traces are
   piped to the user as raw stdout — don't print secrets.
 - **Registry**: any dir under `agents/` with `agent.json` is a sub-agent.
   Fields:
   `name` (delegate handle), `description` (shown to the orchestrator model),
-  `hasMemory: true` to opt into memory. A sub-agent assembles its OWN toolset
-  in its agent.ts (shared builders from lib/ and tools/).
+  `hasMemory: true` to opt into memory, optional `model`/`reasoningEffort`
+  (per-agent model override — e.g. `agents/VISION/agent.json` declares
+  `deepseek-v4-flash-vision-exp`). The fields ride task.json to the spawned
+  entry, which passes them to reactLoop; absent fields fall back to cfg
+  defaults, so plain agents are untouched. A sub-agent assembles its OWN
+  toolset in its agent.ts (shared builders from lib/ and tools/).
 
 ## Guardrails & approvals (security-sensitive — read before changing)
 

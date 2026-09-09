@@ -1,0 +1,5 @@
+{
+  "name": "vision",
+  "description": "Visual analyst — reads the actual content of images (screenshots, diagrams, charts, photos, text inside pictures). You cannot see images yourself: when a question is about what an image shows, delegate it here and name the exact local file path of the image to inspect (e.g. C:\\Users\\...\\shot.png or j:\\ai\\...\\chart.png). It runs on a vision model and calls view_image on the path; only image-content questions go here, never byte/metadata questions (those stay in run_command).",
+  "model": "deepseek-v4-flash-vision-exp"
+}

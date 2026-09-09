@@ -9,8 +9,35 @@ export type Tool = {
   name: string;
   description: string;                 // goes to the API — tells the model when/why to call
   parameters: Record<string, unknown>; // JSON Schema the API validates arguments against
-  run: (args: Record<string, unknown>) => Promise<{ ok: boolean; output: string }>;
+  run: (args: Record<string, unknown>) => Promise<ToolResult>;
 };
+
+// A tool result may carry one image for vision models (http(s) URL or base64 data
+// URL). reactLoop serializes it into an input_image content part inside the
+// function_call_output item — the DeepSeek Responses API route for "the model can
+// see what a tool returned" (deepseek-v4-flash-vision-exp only; other models get
+// a placeholder). Abstraction point: swap the transport per image later (e.g. a
+// Files API file_id ref) without touching the loop.
+export type ToolImage = { url: string; detail?: 'low' | 'high' | 'original' | 'auto' };
+export type ToolResult = { ok: boolean; output: string; image?: ToolImage };
+
+// Content parts the client may put in a function_call_output item. Live API
+// check: DeepSeek only accepts the input_* variants here (400 on output_text:
+// "expected one of input_text, input_image, input_file").
+export type OutputPart =
+  | { type: 'input_text'; text: string }
+  | { type: 'input_image'; image_url: string; detail?: string };
+
+/** Serialize a tool result: plain string output, or content parts when the tool returned an image. */
+export function toolOutputParts(r: ToolResult): string | OutputPart[] {
+  if (!r.image) return (r.ok ? '' : 'ERROR: ') + r.output;
+  const text = (r.ok ? '' : 'ERROR: ') + r.output;
+  const parts: OutputPart[] = text ? [{ type: 'input_text', text }] : [];
+  const img: OutputPart = { type: 'input_image', image_url: r.image.url };
+  if (r.image.detail) (img as { detail?: string }).detail = r.image.detail;
+  parts.push(img);
+  return parts;
+}
 export type LoopResult = { ok: boolean; output: string; log: string[] };
 
 // What happened during a loop step. Emitted to the caller (CLI prints, API
@@ -29,7 +56,7 @@ export function printLoopEvent(e: LoopEvent) {
 export type InputItem =
   | { role: 'user'; content: string }
   | { type: 'function_call'; id: string; call_id: string; name: string; arguments: string }
-  | { type: 'function_call_output'; call_id: string; output: string };
+  | { type: 'function_call_output'; call_id: string; output: string | OutputPart[] };
 
 type OutItem =
   | { type: 'function_call'; id: string; call_id: string; name: string; arguments: string }
@@ -77,7 +104,7 @@ async function postResponses(opts: {
 }
 
 /** Run a tool against parsed, validated JSON args; any failure becomes tool output so the model can recover. */
-async function runSafely(tool: Tool, argumentsJson: string) {
+async function runSafely(tool: Tool, argumentsJson: string): Promise<ToolResult> {
   let args: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(argumentsJson);
@@ -162,7 +189,7 @@ export async function reactLoop({
       history.push({
         type: 'function_call_output',
         call_id: call.call_id,
-        output: result.ok ? result.output : 'ERROR: ' + result.output,
+        output: toolOutputParts(result),
       });
       onEvent?.({ kind: 'observation', ok: result.ok, output: result.output });
       log.push(`Observation: ${result.ok ? 'ok' : 'ERROR'}: ${result.output || '(empty)'}`);
