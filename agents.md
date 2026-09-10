@@ -108,6 +108,7 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   command tools via `wrapGuarded` — choosing the other tool bypasses nothing.
 - Verdicts: `deny` (auto-blocked, no prompt) → `ask` (pauses for human) →
   `allow`. Ask rules are `run_ssh`-scoped; the local Windows box stays
+
   unrestricted. No `/g` regex flags (stateful).
 - Approval channel: sub-agent writes `ask.json` into its taskDir and polls for
   `answer.json` (`makeMailboxAsker`); orchestrator `delegate()` polls the same
@@ -143,7 +144,11 @@ smoke.js                 `npm run smoke` = build + off-line assertions
 Separate from the long-term KB above: a per-conversation Q/A log in
 `memory/conversations/<convId>/transcript.jsonl` (one JSON line per turn),
 written by `createOrchestrator` when given a `convId` (the CLI always does;
-`last.txt` points at the most recent conversation). On boot the CLI loads the
+`last.txt` points at the most recent conversation). Each turn appends its line
+BEFORE the loop runs (`output: ''`) and `updateLastTurn` patches it with the
+final answer — or the error — when the turn ends, so a crash/wedge mid-turn
+still leaves the question (marked interrupted) recoverable on restart. On boot
+the CLI loads the
 last 10 turns (`lib/stm.ts` → `recentContext`, clipped per field) and hands
 `resumeContext` to the orchestrator, which appends it to the system prompt —
 so a restarted process knows what the conversation covered. Restoration is
@@ -151,7 +156,10 @@ deliberately lossy-but-cheap (recent gist, not replay); the full transcript
 stays on disk. `restart` finalizes this process's long-term memory, re-execs
 with `--resume <convId>` (detached, inherited stdio), and exits. Raw + rolling
 on purpose: compaction into summaries is future work, and conversations that
-outgrow the 10-turn window simply forget their oldest context.
+outgrow the 10-turn window simply forget their oldest context. For durable
+work beyond the gist, the system prompt tells the orchestrator to checkpoint
+long builds into a PLAN.md-style file inside the project (see docs/feat/turn-recovery.md
+for the crash-recovery ladder and the full mid-turn replay idea).
 
 ## Dynamic agents & artifact handoffs
 
@@ -170,7 +178,9 @@ outgrow the 10-turn window simply forget their oldest context.
 
 ## Hosts & secrets
 
-- Local machine = Windows (cmd), managed hosts = Linux (sh). The boundary is
+- Local machine = Windows running git-bash (bash syntax; falls back to cmd when
+  no git-bash is installed), managed hosts = Linux (sh). The boundary is
+
   pinned in prompts; never route remote config work through run_command.
 - Secrets are env vars named in `conf/ssh-hosts.ts` (`WARSZAWA-SMALL-HOST`,
   `-USER`, `-PASS`). Never put a secret literal in code or memory.

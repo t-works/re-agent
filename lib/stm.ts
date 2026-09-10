@@ -35,6 +35,17 @@ export function appendTurn(convId: string, turn: Omit<StmTurn, 't' | 'at'>): voi
   writeFileSync(f, prior + (prior ? '\n' : '') + line);
 }
 
+/** Replace the last transcript turn's fields (the line appended at turn start) —
+ *  used to fill in the final answer, or an error, once the turn ends. No-op when
+ *  the transcript is empty/missing (e.g. a bare boot with nothing logged yet). */
+export function updateLastTurn(convId: string, patch: Partial<Pick<StmTurn, 'output'>>): void {
+  if (!isValidConvId(convId)) throw new Error(`bad conversation id: ${convId}`);
+  const turns = readTurns(convId);
+  if (!turns.length) return;
+  turns[turns.length - 1] = { ...turns[turns.length - 1], ...patch };
+  writeFileSync(transcriptFile(convId), turns.map((x) => JSON.stringify(x)).join('\n') + '\n');
+}
+
 /** All turns, oldest first; corrupt lines are dropped, missing transcript = []. */
 export function readTurns(convId: string): StmTurn[] {
   try {
@@ -61,7 +72,7 @@ export function recentContext(convId: string, k = 10): { block: string; count: n
   const turns = readTurns(convId).slice(-k);
   if (!turns.length) return { block: '', count: 0 };
   const body = turns
-    .map((x) => `You: ${clip(x.q, 400)}\nAgent: ${clip(x.output, 1500)}`)
+    .map((x) => `You: ${clip(x.q, 400)}\nAgent: ${x.output ? clip(x.output, 1500) : '(interrupted — this turn did not complete)'}`)
     .join('\n\n');
   return {
     count: turns.length,

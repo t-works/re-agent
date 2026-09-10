@@ -17,7 +17,7 @@ import { makeRunSshTool } from '../tools/ssh';
 import { POOL_NAMES } from '../tools/pool';
 import { wrapGuarded, type ApprovalRequest } from './guard';
 import { loadMemoryContext, MEMORY_WRITER_SYSTEM, writeMemoryTools } from './memory';
-import { appendTurn } from './stm';
+import { appendTurn, updateLastTurn } from './stm';
 import cfg from '../conf/config';
 import policy from '../conf/guardrails';
 
@@ -238,20 +238,33 @@ export function createOrchestrator(
 
       const tools: Tool[] = [localRun, ...(runSsh ? [wrapGuarded(runSsh, ask)] : []), delegateTool, createAgentTool];
 
-      const result = await reactLoop({
-        systemPrompt,
-        task: question,
-        tools,
-        onEvent: (e) => emit?.(e),
-        model: cfg.orchestratorModel,
-        reasoningEffort: cfg.orchestratorReasoningEffort,
-      });
-      // Short-term memory: log this turn so a restarted process can restore the
-      // conversation. Best-effort — a failed write must never fail the turn.
+      // Short-term memory: log the question BEFORE the turn runs, so a crash or
+      // wedge mid-turn still leaves the conversation recoverable on restart; the
+      // completed turn's output (or the error) then patches that same last line.
+      // Best-effort — a failed write must never fail the turn.
       if (opts.convId) {
         try {
-          appendTurn(opts.convId, { sid, q: question, output: result.output });
+          appendTurn(opts.convId, { sid, q: question, output: '' });
         } catch { /* ignore */ }
+      }
+      let result;
+      try {
+        result = await reactLoop({
+          systemPrompt,
+          task: question,
+          tools,
+          onEvent: (e) => emit?.(e),
+          model: cfg.orchestratorModel,
+          reasoningEffort: cfg.orchestratorReasoningEffort,
+        });
+      } catch (e) {
+        if (opts.convId) {
+          try { updateLastTurn(opts.convId, { output: 'ERROR: ' + (e as Error).message }); } catch { /* ignore */ }
+        }
+        throw e;
+      }
+      if (opts.convId) {
+        try { updateLastTurn(opts.convId, { output: result.output }); } catch { /* ignore */ }
       }
       return { ...result, sid };
     },

@@ -68,6 +68,43 @@ const echoTool = {
   assert.strictEqual(seen3[0].ok, false);
   assert.ok(r3.log.some((l) => l.includes('Unknown tool: ghost')), 'log must name the unknown tool');
 
+  // 3b) Reasoning echo + call batching: with thinking enabled, a follow-up
+  // request must carry the response's reasoning item back verbatim AND list all
+  // function_calls before any function_call_output — DeepSeek 400s on both
+  // omissions (interleaved call/output pairs fail too).
+  const reasoningItem = {
+    type: 'reasoning', id: 'rs_1', status: 'completed',
+    content: [{ type: 'reasoning_text', text: 'think think' }], summary: [], encrypted_content: 'xyz',
+  };
+  const reasonBodies = [
+    resp(reasoningItem, fnCall('c1', 'echo', '{"input":"a"}'), fnCall('c2', 'echo', '{"input":"b"}')),
+    resp(msg('thought done')),
+  ];
+  let bn = 0;
+  const reqs = [];
+  global.fetch = async (_url, init) => {
+    reqs.push(JSON.parse(init.body));
+    const body = reasonBodies[bn++];
+    assert.ok(body, 'fetch called more than expected');
+    return { ok: true, json: async () => body };
+  };
+  const r3b = await reactLoop({ systemPrompt: 's', task: 't', tools: [echoTool] });
+  assert.strictEqual(r3b.output, 'thought done');
+  assert.deepStrictEqual(reqs[0].input, [{ role: 'user', content: 't' }], 'first request must start clean');
+  const in2 = reqs[1].input;
+  const echoed = in2.filter((it) => it.type === 'reasoning');
+  assert.strictEqual(echoed.length, 1, 'second request must echo the reasoning item');
+  assert.strictEqual(echoed[0].id, 'rs_1');
+  assert.strictEqual(echoed[0].content[0].text, 'think think', 'reasoning must ride back verbatim');
+  const kinds = in2.map((it) => it.type);
+  const fcs = kinds.filter((k) => k === 'function_call').length;
+  const fcos = kinds.filter((k) => k === 'function_call_output').length;
+  assert.strictEqual(fcs, 2);
+  assert.strictEqual(fcos, 2);
+  const lastCall = kinds.lastIndexOf('function_call');
+  const firstOut = kinds.indexOf('function_call_output');
+  assert.ok(firstOut > lastCall, 'all function_calls must precede all function_call_outputs');
+
   console.log = clog;
   assert.strictEqual(printed, 0, 'core must not print to stdout');
 
@@ -214,6 +251,23 @@ const echoTool = {
   assert.strictEqual(capped.count, 1);
   assert.ok(capped.block.includes('check disk') && !capped.block.includes('warszawa'), 'k cap must keep the newest turns');
   assert.strictEqual(stm.recentContext('no-such-conv').block, '', 'missing transcript must yield an empty block');
+  // Interrupted turns: the question is logged at turn START (output ''), and
+  // updateLastTurn patches that line with the final answer or error on completion.
+  const convInt = 'smokeint' + Date.now();
+  stm.appendTurn(convInt, { sid: 's9', q: 'long build?', output: '' }); // crashed before finishing
+  const intCtx = stm.recentContext(convInt, 10);
+  assert.strictEqual(intCtx.count, 1);
+  assert.ok(intCtx.block.includes('(interrupted'), 'unfinished turn must render as interrupted on resume');
+  stm.updateLastTurn(convInt, { output: 'ERROR: API 400' });
+  assert.ok(stm.recentContext(convInt, 10).block.includes('API 400'), 'patched output must replace the interrupted marker');
+  stm.appendTurn(convInt, { sid: 's10', q: 'retry?', output: '' });
+  stm.updateLastTurn(convInt, { output: 'scaffolded' });
+  const intTurns = stm.readTurns(convInt);
+  assert.strictEqual(intTurns.length, 2, 'patch must not add or drop transcript lines');
+  assert.strictEqual(intTurns[1].output, 'scaffolded');
+  assert.strictEqual(intTurns[0].output, 'ERROR: API 400');
+  stm.updateLastTurn('no-such-conv', { output: 'x' }); // must be a safe no-op
+  rmSync(join(convRoot, convInt), { recursive: true, force: true });
   stm.rememberLast(conv);
   assert.strictEqual(stm.lastConvId(), conv, 'last pointer must roundtrip');
   rmSync(join(convRoot, conv), { recursive: true, force: true });

@@ -56,7 +56,11 @@ export function printLoopEvent(e: LoopEvent) {
 export type InputItem =
   | { role: 'user'; content: string }
   | { type: 'function_call'; id: string; call_id: string; name: string; arguments: string }
-  | { type: 'function_call_output'; call_id: string; output: string | OutputPart[] };
+  | { type: 'function_call_output'; call_id: string; output: string | OutputPart[] }
+  // A reasoning item echoed back verbatim from a previous response. DeepSeek's
+  // /responses 400s ("reasoning_text ... must be passed back to the API") when a
+  // turn's follow-up request drops the prior reasoning item.
+  | { type: 'reasoning'; [k: string]: unknown };
 
 type OutItem =
   | { type: 'function_call'; id: string; call_id: string; name: string; arguments: string }
@@ -81,6 +85,10 @@ async function postResponses(opts: {
   const res = await fetch(cfg.baseURL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    // No timeout = a stalled connection hangs the whole turn forever (seen live:
+    // an idle process with no children, wedged mid-fetch). 5 min is generous for
+    // a long effort-high reasoning response; a dead socket errors instead of hangs.
+    signal: AbortSignal.timeout(300_000),
     body: JSON.stringify({
       model: opts.model,
       reasoning: { effort: opts.reasoningEffort },
@@ -145,8 +153,9 @@ export async function reactLoop({
   const usedModel = model ?? cfg.model;
   const usedEffort = reasoningEffort ?? cfg.reasoningEffort;
   // Stateless history: the task message, then one function_call + its
-  // function_call_output per executed tool. Model commentary is shown but not
-  // echoed back — the call items carry all the state.
+  // function_call_output per executed tool, plus any reasoning items echoed
+  // back verbatim (see below). Model commentary is shown but not echoed back
+  // — the call items carry all the state.
   const history: InputItem[] = [{ role: 'user', content: task }];
 
   for (let i = 0; i < cfg.maxIterations; i++) {
@@ -174,11 +183,27 @@ export async function reactLoop({
       return { ok: true, output: texts.join('\n').trim(), log };
     }
 
+    // The next request of this turn must carry the response's reasoning items
+    // back verbatim (reasoning always precedes the function_calls in output).
+    // Not needed on the final answer above — no follow-up request is made.
+    for (const o of body.output) if (o.type === 'reasoning') history.push(o as InputItem);
+
+    // Run every tool first (observations stream as they finish), but stage the
+    // history items: the follow-up request must list ALL function_calls before
+    // ANY function_call_output. DeepSeek's thinking-mode continuation 400s with
+    // "reasoning_text ... must be passed back to the API" when outputs are
+    // interleaved between parallel calls.
+    const done: { call: (typeof calls)[number]; result: ToolResult }[] = [];
     for (const call of calls) {
       const tool = tools.find((t) => t.name === call.name);
       const result = tool
         ? await runSafely(tool, call.arguments)
         : { ok: false, output: `Unknown tool: ${call.name}. Known: ${tools.map((t) => t.name).join(', ')}` };
+      done.push({ call, result });
+      onEvent?.({ kind: 'observation', ok: result.ok, output: result.output });
+      log.push(`Observation: ${result.ok ? 'ok' : 'ERROR'}: ${result.output || '(empty)'}`);
+    }
+    for (const { call } of done) {
       history.push({
         type: 'function_call',
         id: call.id,
@@ -186,13 +211,13 @@ export async function reactLoop({
         name: call.name,
         arguments: call.arguments,
       });
+    }
+    for (const { call, result } of done) {
       history.push({
         type: 'function_call_output',
         call_id: call.call_id,
         output: toolOutputParts(result),
       });
-      onEvent?.({ kind: 'observation', ok: result.ok, output: result.output });
-      log.push(`Observation: ${result.ok ? 'ok' : 'ERROR'}: ${result.output || '(empty)'}`);
     }
   }
   return { ok: false, output: 'Max iterations reached.', log };
