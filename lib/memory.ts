@@ -10,9 +10,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import type { Tool } from './react';
+import { STATE_ROOT } from './roots';
 
-const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
-const AGENTS_MEMORY_ROOT = join(SRC_ROOT, 'memory', 'agents');
+const AGENTS_MEMORY_ROOT = join(STATE_ROOT, 'memory', 'agents');
 
 export type MemoryFile = { file: string; content: string };
 export type MemoryContext = { hub: string | null; spokes: MemoryFile[] };

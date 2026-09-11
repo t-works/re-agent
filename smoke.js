@@ -3,6 +3,15 @@
 //    printing on its own. 2) createOrchestrator builds without a terminal.
 // 3) The tool round-trip and the unknown-tool recovery path work.
 const assert = require('assert');
+const { mkdtempSync, rmSync } = require('fs');
+const { join: pjoin } = require('path');
+const { tmpdir } = require('os');
+// Smoke gets its own throwaway STATE_ROOT so it never reads or wipes a real
+// project's memory/ or runtime agents. Must be set before the core modules
+// load — lib/roots.ts resolves STATE_ROOT at import time.
+const smokeState = mkdtempSync(pjoin(tmpdir(), 'react-smoke-state-'));
+process.env.REACT_STATE_DIR = smokeState;
+const roots = require('./dist/lib/roots');
 const { reactLoop } = require('./dist/lib/react');
 const { createOrchestrator } = require('./dist/lib/orchestrator');
 
@@ -128,7 +137,7 @@ const echoTool = {
   const { classifyCommand, wrapGuarded, makeMailboxAsker } = require('./dist/lib/guard');
   const { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } = require('fs');
   const { tmpdir } = require('os');
-  const { join } = require('path');
+  const { join, isAbsolute } = require('path');
   assert.strictEqual(classifyCommand('rm -rf /', 'run_ssh'), 'deny');
   assert.strictEqual(classifyCommand('cat /etc/hosts', 'run_ssh'), 'allow');
   assert.strictEqual(classifyCommand('systemctl restart nginx', 'run_command'), 'allow', 'ask rules must not fire on the local tool');
@@ -240,7 +249,7 @@ const echoTool = {
   assert.strictEqual(stm.isValidConvId('a.b-c_d'), true);
   assert.strictEqual(stm.isValidConvId('../evil'), false, 'conv ids must not traverse paths');
   const conv = 'smoke' + Date.now();
-  const convRoot = join(__dirname, 'memory', 'conversations');
+  const convRoot = join(roots.STATE_ROOT, 'memory', 'conversations');
   const priorLast = stm.lastConvId();
   stm.appendTurn(conv, { sid: 's1', q: 'which hosts run nginx?', output: 'warszawa' });
   stm.appendTurn(conv, { sid: 's2', q: 'check disk', output: '12% used' });
@@ -329,7 +338,7 @@ const echoTool = {
   assert.deepStrictEqual(bareSpec.validated.json.tools, [], 'absent tools must default to []');
 
   // --- 15) runtime/agents registry: created agents register without a restart ---
-  const runtimeRoot = join(__dirname, 'runtime', 'agents');
+  const runtimeRoot = join(roots.STATE_ROOT, 'runtime', 'agents');
   rmSync(runtimeRoot, { recursive: true, force: true }); // deterministic: no leftovers from crashed runs
   const rdir = join(runtimeRoot, 'smoke-runtime-agent');
   mkdirSync(rdir, { recursive: true });
@@ -339,11 +348,35 @@ const echoTool = {
   const rra = orch2.agents.find((a) => a.name === 'smoke-runtime-agent');
   assert.ok(rra, 'runtime/agents entries must appear in the registry');
   assert.strictEqual(rra.hasMemory, false);
-  assert.ok(rra.dir.replace(/\\/g, '/').startsWith('runtime/'), 'runtime agents must keep their project-relative dir');
+  assert.ok(
+    isAbsolute(rra.dir) && rra.dir.endsWith(join('runtime', 'agents', 'smoke-runtime-agent')),
+    'runtime agents must expose an absolute source dir'
+  );
   rmSync(rdir, { recursive: true, force: true });
   rmSync(runtimeRoot, { recursive: true, force: true });
   const orch3 = createOrchestrator();
   assert.ok(!orch3.agents.find((a) => a.name === 'smoke-runtime-agent'), 'removed runtime agents must drop out');
+
+  // --- 16) Root resolution: code root separate from per-project state ---
+  assert.strictEqual(roots.CODE_ROOT, __dirname, 'CODE_ROOT must be this install dir');
+  assert.strictEqual(roots.WORK_ROOT, process.cwd(), 'WORK_ROOT must be the launch dir');
+  assert.strictEqual(roots.STATE_ROOT, smokeState, 'explicit REACT_STATE_DIR pins state');
+  const pA = mkdtempSync(join(tmpdir(), 'rootsA-'));
+  mkdirSync(join(pA, '.react'), { recursive: true });
+  mkdirSync(join(pA, 'memory'), { recursive: true });
+  assert.strictEqual(roots.resolveStateRoot(pA, {}), join(pA, '.react'), '.react dir opts the project in, over legacy memory/');
+  const pB = mkdtempSync(join(tmpdir(), 'rootsB-'));
+  mkdirSync(join(pB, 'memory'), { recursive: true });
+  assert.strictEqual(roots.resolveStateRoot(pB, {}), pB, 'existing memory/ keeps the legacy in-repo layout');
+  const pC = mkdtempSync(join(tmpdir(), 'rootsC-'));
+  const rHome = mkdtempSync(join(tmpdir(), 'rootho-'));
+  const sC = roots.resolveStateRoot(pC, { REACT_HOME: rHome });
+  assert.ok(sC.startsWith(join(rHome, 'projects')) && sC !== pC, 'a bare project gets isolated home state');
+  assert.strictEqual(roots.resolveStateRoot(pC, { REACT_HOME: rHome }), sC, 'state dir must be stable for the same path');
+  const pD = mkdtempSync(join(tmpdir(), 'rootsD-'));
+  assert.notStrictEqual(roots.resolveStateRoot(pD, { REACT_HOME: rHome }), sC, 'different paths must not share state');
+  for (const d of [pA, pB, pC, pD, rHome]) rmSync(d, { recursive: true, force: true });
+  rmSync(smokeState, { recursive: true, force: true }); // throwaway state, never a real project's
 
   console.log(`smoke ok — core silent, ${orch.agents.length} sub-agents registered`);
   console.log(`  agents: ${orch.agents.map((a) => `${a.name}${a.hasMemory ? ' (memory)' : ''}`).join(', ')}`);

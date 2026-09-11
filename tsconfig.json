@@ -8,5 +8,7 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["**/*.ts"]
+  "include": ["**/*.ts"],
+  // State dirs are data, not source: agents write .ts into memory/ workspaces
+  "exclude": ["node_modules", "dist", "memory", "runtime"]
 }

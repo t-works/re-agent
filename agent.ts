@@ -14,6 +14,7 @@ import { createOrchestrator } from './lib/orchestrator';
 import type { TurnEvent } from './lib/orchestrator';
 import type { ApprovalRequest } from './lib/guard';
 import { printLoopEvent } from './lib/react';
+import { STATE_ROOT, WORK_ROOT } from './lib/roots';
 import * as stm from './lib/stm';
 
 if (!cfg.apiKey) { console.error('Set DEEPSEEK_API_KEY first.'); process.exit(1); }
@@ -106,6 +107,8 @@ const prompt = () => rl.question('\nYou: ', async (q) => {
 
 console.log(
   `Orchestrator ready. Sub-agents: ${orchestrator.agents.map((a) => a.name).join(', ') || '(none)'}\n` +
+  `Working dir: ${WORK_ROOT}\n` +
+  `State:       ${STATE_ROOT}\n` +
   `Conversation ${convId} — ${boot.resumed ? `resumed (last ${boot.count} turn${boot.count === 1 ? '' : 's'} in context)` : 'new'}` +
   '  (q = quit, restart = reload process with context)'
 );

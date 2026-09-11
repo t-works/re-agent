@@ -20,6 +20,7 @@ runner.ts                generic data-agent entry (agent.json tools list → dis
 system.txt               orchestrator system prompt (has {agents} placeholder)
 lib/react.ts             shared ReAct loop over the Responses API (stateless)
 lib/orchestrator.ts      turn orchestration, delegate() (mailbox spawn), create_agent, finalize()
+lib/roots.ts             CODE_ROOT / WORK_ROOT / STATE_ROOT resolution (run from any directory)
 lib/guard.ts             guardrail classification + approval gates (deny/ask)
 lib/memory.ts            hub-and-spoke memory store, tools, memoryWriter prompt
 lib/stm.ts               short-term conversation transcript (restart continuity)
@@ -36,25 +37,56 @@ agents/<SUB-AGENT>/     one dir per sub-agent, e.g. agents/CONFIG-EDITOR/
   system.txt             that agent's system prompt
   agent.ts               entry; compiled to dist/agents/<SUB-AGENT>/agent.js
                          (absent + tools list = data agent → runs on runner.ts)
-runtime/agents/          GITIGNORED: agents created at runtime via create_agent
-memory/                  GITIGNORED: sessions/ (mailboxes + per-session workspace/)
-                         + agents/ (KB notes) + conversations/ (short-term transcripts, lib/stm.ts)
+runtime/agents/          create_agent output — writable state, under STATE_ROOT (see Roots)
+memory/                  writable state, under STATE_ROOT: sessions/ (mailboxes +
+                         per-session workspace/), agents/ (KB notes), conversations/
+                         (short-term transcripts, lib/stm.ts)
 docs/feat/               future-feature descriptions (write when deferring)
 smoke.js                 `npm run smoke` = build + off-line assertions
 ```
 
 ## Build / run / test
 
-- `npm run build` — `tsc` (all `*.ts` incl. sub-agent dirs → `dist/`)
+- `npm run build` — `tsc` (all `*.ts` incl. sub-agent dirs → `dist/`; the
+  state dirs `memory/` + `runtime/` are excluded — they are data, not source)
 - `node dist/agent.js [--new | --resume <convId>]` — CLI. Requires
   `DEEPSEEK_API_KEY`. A bare start resumes the last conversation; `--new`
   starts fresh. At the prompt, `restart` re-execs the process so boot-time
   state (agent registry, compiled sub-agents) reloads — conversation context
-  rides back in from short-term memory (see below).
+  rides back in from short-term memory (see below). Run it from the project
+  you want it to work on (`cd myproj && node <install>/dist/agent.js`):
+  commands run there and state resolves per project (see Roots).
 - `npm run smoke` — build + off-line checks (no network). Extend it when you
   add non-trivial logic; it caught a real bug already.
 - Model knobs: `DEEPSEEK_MODEL`, `DEEPSEEK_REASONING_EFFORT`, orchestrator
   overrides in `conf/config.ts`.
+
+## Roots (run from any project)
+
+`lib/roots.ts` replaces the old single `SRC_ROOT` with three roots, so the core
+runs from any directory without projects sharing state:
+
+- **`CODE_ROOT`** — the framework install (`dist/lib/..`): read-only assets —
+  `system.txt`, shipped `agents/`, `runner.js`. Never written.
+- **`WORK_ROOT`** — `process.cwd()` at launch: the project. `run_command` and
+  spawned sub-agents inherit it, so commands already run here; the orchestrator
+  prompt gets a `Working directory:` line.
+- **`STATE_ROOT`** — every writable path (`memory/{sessions,conversations,agents}`,
+  `runtime/agents/`). Resolved at boot in order: `$REACT_STATE_DIR` (absolute or
+  relative to cwd) → `<WORK_ROOT>/.react` if it already exists (opt-in) →
+  `<WORK_ROOT>` if `memory/` already exists (this repo's legacy layout) →
+  `~/.react-agent/projects/<basename>-<hash8 of abs path>` (isolated per project).
+  `$REACT_HOME` overrides the `~/.react-agent` home. So this repo keeps its
+  existing `memory/`, every other project defaults to its own global slot.
+
+The registry merges roots, nearest name wins: `<WORK_ROOT>/agents` →
+`<STATE_ROOT>/runtime/agents` → `~/.react-agent/agents` (shared roster, usable
+from anywhere) → `CODE_ROOT/agents` (shipped). `AgentDef.dir` is absolute; only
+`CODE_ROOT` agents can have a compiled custom entry
+(`dist/agents/<name>/agent.js`), everything else runs on `runner.ts`.
+
+`tsconfig.json` excludes `memory/` and `runtime/`: agents write `.ts` files into
+session workspaces, and state must never be compiled as source.
 
 ## Core conventions
 
@@ -73,7 +105,7 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   agent.ts — e.g. anything `create_agent` makes) run the shared `runner.ts`
   instead, which derives tools + prompt from agent.json + system.txt. Args:
   custom `node dist/agents/<DIR>/agent.js <taskDir>`, data `node dist/runner.js
-  <agentSrcDir> <taskDir>`; `<taskDir>` = `memory/sessions/<sid>/agent-tasks/<tid>/`.
+  <agentSrcDir> <taskDir>`; `<taskDir>` = `<STATE_ROOT>/memory/sessions/<sid>/agent-tasks/<tid>/`.
   Child reads `task.json` ({ id, from, to, task, workspace?, model?,
   reasoningEffort? }) via `lib/task.ts`, runs its own reactLoop, writes
   `result.json` ({ id, from, ok, output, log }) via lib/task.ts, exits 0/1.
@@ -81,9 +113,10 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   `workspace` points at the per-session artifact dir (`memory/sessions/<sid>/workspace/`):
   agents hand each other files there with read_artifact/write_artifact so
   payloads don't round-trip through the orchestrator's context.
-- **Registry**: any dir under `agents/` (committed) **or `runtime/agents/`**
-  (created by `create_agent`, gitignored) with `agent.json` is a sub-agent;
-  `agents/` wins on a name collision. Fields: `name` (delegate handle),
+- **Registry**: any dir with `agent.json` under `<WORK_ROOT>/agents/` (project),
+  `<STATE_ROOT>/runtime/agents/` (created by `create_agent`), `~/.react-agent/agents/`
+  (shared), or `CODE_ROOT/agents/` (shipped) is a sub-agent; the nearest root
+  wins on a name collision. Fields: `name` (delegate handle),
   `description` (shown to the orchestrator model), `hasMemory: true` to opt
   into memory, optional `model`/`reasoningEffort` (per-agent model override —
   e.g. `agents/VISION/agent.json` declares `deepseek-v4-flash-vision-exp`),
@@ -94,8 +127,8 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   spawned entry, which passes them to reactLoop; absent fields fall back to
   cfg defaults, so plain agents are untouched.
 - **Dynamic agents**: the orchestrator authors new specialists at runtime via
-  `create_agent` (writes agent.json + system.txt under runtime/agents/, after
-  the human approval gate — a new command-capable principal), then delegates
+  `create_agent` (writes agent.json + system.txt under `STATE_ROOT/runtime/agents/`,
+  after the human approval gate — a new command-capable principal), then delegates
   to them in the same turn; they run on runner.ts (no per-agent build).
   Lifecycle: created agents persist on disk across `restart` (the registry is
   re-scanned at boot); nothing auto-cleans them yet (ponytail: stale rosters

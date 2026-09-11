@@ -4,14 +4,14 @@
 // process (CLI `restart`, crash recovery, `--resume <id>`) can rebuild context
 // by loading the most recent turns. Raw and rolling by design — the boot loader
 // clips, it never summarizes; long-term distillation stays in lib/memory.ts
-// (the hasMemory knowledge base). Layout:
+// (the hasMemory knowledge base). Layout (all under STATE_ROOT, lib/roots.ts):
 //   memory/conversations/last.txt                          the most recent conversation id
 //   memory/conversations/<convId>/transcript.jsonl         one JSON object per turn
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { STATE_ROOT } from './roots';
 
-const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
-const CONVERSATIONS_ROOT = join(SRC_ROOT, 'memory', 'conversations');
+const CONVERSATIONS_ROOT = join(STATE_ROOT, 'memory', 'conversations');
 
 // Conv ids appear in file paths and come from argv — alnum/dot/dash/underscore only.
 export function isValidConvId(id: string): boolean {

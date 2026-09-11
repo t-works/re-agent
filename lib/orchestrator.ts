@@ -2,14 +2,14 @@
 // tools, delegating to sub-agents (dirs with agent.json) via text-file mailboxes.
 // Transport-free — no stdin/stdout/readline here. CLI (agent.ts) and a future
 // API front-end both call createOrchestrator().ask().
-// Memory layout:
+// Memory layout (all under STATE_ROOT, see lib/roots.ts):
 //   memory/sessions/session-list.json              [{ session-uuid }]
 //   memory/sessions/<session-uuid>/agent-tasks/<task-uuid>/{task,result}.json
 //   memory/conversations/<convId>/transcript.jsonl short-term Q/A log (lib/stm.ts)
 import { spawn } from 'child_process';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs';
-import { join, relative } from 'path';
+import { isAbsolute, join, relative } from 'path';
 import { reactLoop } from './react';
 import type { LoopEvent, Tool } from './react';
 import { runCommand } from '../tools/run-command';
@@ -20,11 +20,16 @@ import { loadMemoryContext, MEMORY_WRITER_SYSTEM, writeMemoryTools } from './mem
 import { appendTurn, updateLastTurn } from './stm';
 import cfg from '../conf/config';
 import policy from '../conf/guardrails';
+import { CODE_ROOT, HOME_ROOT, STATE_ROOT, WORK_ROOT } from './roots';
 
-const SRC_ROOT = join(__dirname, '..', '..'); // dist/lib -> project root
-const AGENTS_ROOT = join(SRC_ROOT, 'agents'); // hand-authored sub-agents (committed)
-const RUNTIME_AGENTS_ROOT = join(SRC_ROOT, 'runtime', 'agents'); // create_agent output (gitignored)
-const SESSIONS_ROOT = join(SRC_ROOT, 'memory', 'sessions');
+// Registry roots, nearest wins (see loadRegistry): project-authored agents,
+// agents created during this project's sessions, the shared user roster, then
+// the shipped ones. Only CODE_ROOT agents can have a compiled custom entry.
+const PROJECT_AGENTS_ROOT = join(WORK_ROOT, 'agents');
+const AGENTS_ROOT = join(CODE_ROOT, 'agents');
+const RUNTIME_AGENTS_ROOT = join(STATE_ROOT, 'runtime', 'agents');
+const HOME_AGENTS_ROOT = join(HOME_ROOT, 'agents');
+const SESSIONS_ROOT = join(STATE_ROOT, 'memory', 'sessions');
 
 export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean; model?: string; reasoningEffort?: string };
 type SessionEntry = { 'session-uuid': string };
@@ -66,8 +71,9 @@ export function createOrchestrator(
   /** Roster + full orchestrator system prompt, rebuilt from a fresh scan each turn. */
   function buildSystemPrompt(): string {
     const roster = loadRegistry().map((a) => `- ${a.name}: ${a.description}`).join('\n');
-    const base = readFileSync(join(SRC_ROOT, 'system.txt'), 'utf8').replace('{agents}', roster || '- (none)');
-    return opts.resumeContext ? base + '\n\n' + opts.resumeContext : base;
+    const base = readFileSync(join(CODE_ROOT, 'system.txt'), 'utf8').replace('{agents}', roster || '- (none)');
+    const located = `${base}\n\nWorking directory: ${WORK_ROOT} — run_command and delegated agents operate here.`;
+    return opts.resumeContext ? located + '\n\n' + opts.resumeContext : located;
   }
 
   /** Hand a task to a sub-agent through the session mailbox (native structured args — no text parsing). */
@@ -95,14 +101,20 @@ export function createOrchestrator(
       )
     );
 
-    emit?.({ kind: 'note', content: `\n>>> delegating to ${agent.name} (mailbox: ${relative(SRC_ROOT, taskDir)}) <<<\n` });
+    emit?.({ kind: 'note', content: `\n>>> delegating to ${agent.name} (mailbox: ${relative(STATE_ROOT, taskDir)}) <<<\n` });
 
     // Compiled custom entry wins; data agents (agent.json with a tools list, no
-    // agent.ts) run on the shared generic runner — new agents need no per-agent build.
-    const agentJs = join(__dirname, '..', agent.dir, 'agent.js');
+    // agent.ts) run on the shared generic runner — new agents need no per-agent
+    // build. Only shipped agents sit under CODE_ROOT and have a dist mirror;
+    // project/runtime agents (absolute dir) are data agents on the runner.
+    const inCode = relative(CODE_ROOT, agent.dir);
+    const agentJs =
+      inCode && !inCode.startsWith('..') && !isAbsolute(inCode)
+        ? join(CODE_ROOT, 'dist', inCode, 'agent.js')
+        : join(agent.dir, 'agent.js');
     const entryArgs = existsSync(agentJs)
       ? [agentJs, taskDir]
-      : [join(__dirname, '..', 'runner.js'), join(SRC_ROOT, agent.dir), taskDir];
+      : [join(__dirname, '..', 'runner.js'), agent.dir, taskDir];
     await new Promise<void>((resolve) => {
       // Pipe the sub-agent's trace back through emit (instead of stdio inherit) so an
       // API front-end receives it as events rather than writing to server stdout.
@@ -148,7 +160,7 @@ export function createOrchestrator(
       const result = JSON.parse(readFileSync(join(taskDir, 'result.json'), 'utf8')) as { ok: boolean; output: string };
       return { ok: result.ok, output: `[${agent.name}] ${result.output}` };
     } catch {
-      return { ok: false, output: `${agent.name} agent crashed without a result (${relative(SRC_ROOT, taskDir)})` };
+      return { ok: false, output: `${agent.name} agent crashed without a result (${relative(STATE_ROOT, taskDir)})` };
     }
   }
 
@@ -163,7 +175,7 @@ export function createOrchestrator(
       const sessions = readJson<SessionEntry[]>(join(SESSIONS_ROOT, 'session-list.json'), []);
       sessions.push({ 'session-uuid': sid });
       writeFileSync(join(SESSIONS_ROOT, 'session-list.json'), JSON.stringify(sessions, null, 2));
-      emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(SRC_ROOT, sessionDir)})\n` });
+      emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(STATE_ROOT, sessionDir)})\n` });
       const systemPrompt = buildSystemPrompt(); // fresh roster each turn: created agents appear next turn
 
       const delegateTool: Tool = {
@@ -231,7 +243,7 @@ export function createOrchestrator(
           writeFileSync(join(dir, 'system.txt'), v.validated.systemPrompt.trimEnd() + '\n');
           return {
             ok: true,
-            output: `Agent "${v.validated.json.name}" created (${relative(SRC_ROOT, dir)}). Delegate to it now with delegate(name: "${v.validated.json.name}", ...).`,
+            output: `Agent "${v.validated.json.name}" created (${relative(STATE_ROOT, dir)}). Delegate to it now with delegate(name: "${v.validated.json.name}", ...).`,
           };
         },
       };
@@ -302,12 +314,13 @@ export function createOrchestrator(
 }
 
 /**
- * Scan agents/ (committed, hand-authored) + runtime/agents/ (created by
- * create_agent, gitignored) for dirs containing agent.json. agents/ wins on a
- * name collision (committed source is authoritative).
+ * Scan the registry roots for dirs containing agent.json — project agents
+ * (<WORK_ROOT>/agents), this project's session-created agents, the shared user
+ * roster (~/.react-agent/agents), then the shipped <CODE_ROOT>/agents. The
+ * first occurrence of a name wins (the nearest root is authoritative).
  */
 function loadRegistry(): AgentDef[] {
-  const entries = [AGENTS_ROOT, RUNTIME_AGENTS_ROOT].flatMap(scanRoot);
+  const entries = [PROJECT_AGENTS_ROOT, RUNTIME_AGENTS_ROOT, HOME_AGENTS_ROOT, AGENTS_ROOT].flatMap(scanRoot);
   const seen = new Set<string>();
   return entries.filter((a) => (seen.has(a.name) ? false : (seen.add(a.name), true)));
 }
@@ -326,13 +339,14 @@ function scanRoot(root: string): AgentDef[] {
         model?: string; // optional per-agent model override (e.g. deepseek-v4-flash-vision-exp)
         reasoningEffort?: string;
       };
-      // dir is project-root-relative: dist mirrors agents/ (dist/agents/<name>/agent.js for
-      // custom entries); data agents have no dist copy and run on the shared runner instead.
+      // dir is absolute: shipped agents under CODE_ROOT have a dist mirror
+      // (dist/agents/<name>/agent.js for custom entries); project/runtime agents
+      // have no dist copy and run on the shared runner instead.
       return [
         {
           name: meta.name ?? d.name,
           description: meta.description ?? '',
-          dir: relative(SRC_ROOT, join(root, d.name)),
+          dir: join(root, d.name),
           hasMemory: meta.hasMemory === true,
           ...(meta.model && { model: meta.model }),
           ...(meta.reasoningEffort && { reasoningEffort: meta.reasoningEffort }),
