@@ -1,13 +1,21 @@
-# react-agent
+# @tworks/re-agent
 
-Minimal TypeScript multi-agent ReAct framework on the DeepSeek Responses API.
+Extremely minimal, raw and risky TypeScript multi-agent ReAct framework on the DeepSeek Responses API.
+If you want to play with it - you were warned, this is experimental code. 
+If you encounter any issue or if you have a feature request describe it in issues.
+
 One orchestrator loop answers each turn; it runs local shell commands, SSHes to
 configured hosts, `delegate`s to sub-agents, and can author new specialist
 agents at runtime with `create_agent`.
 
 Runs from any directory: the project you launch it in is the working directory,
 and all writable state (sessions, conversation memory, agents created in a
-session) is kept per project.
+session) is kept per project and last conversation is automatically restored. 
+
+## Why just Deepseek
+It is enough for what I do and there is close to 0 chance it burns your cash in an hour (https://www.youtube.com/shorts/7vBb4VvYX7g).
+At the moment I do not plan extending support for more providers.
+
 
 ## Install & run
 

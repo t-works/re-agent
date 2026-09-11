@@ -1,7 +1,7 @@
 {
-  "name": "react-agent",
+  "name": "@t-works/re-agent",
   "version": "0.1.0",
-  "description": "Minimal TypeScript multi-agent ReAct framework on the DeepSeek Responses API — runs from any project directory.",
+  "description": "Minimal TypeScript multi-agent Re framework on the DeepSeek Responses API — runs from any project directory.",
   "license": "MIT",
   "bin": {
     "react-agent": "dist/agent.js"
