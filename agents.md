@@ -43,6 +43,7 @@ memory/                  writable state, under STATE_ROOT: sessions/ (mailboxes 
                          (short-term transcripts, lib/stm.ts)
 docs/feat/               future-feature descriptions (write when deferring)
 smoke.js                 `npm run smoke` = build + off-line assertions
+README.md                npm-facing install/usage blurb
 ```
 
 ## Build / run / test
@@ -60,6 +61,12 @@ smoke.js                 `npm run smoke` = build + off-line assertions
   add non-trivial logic; it caught a real bug already.
 - Model knobs: `DEEPSEEK_MODEL`, `DEEPSEEK_REASONING_EFFORT`, orchestrator
   overrides in `conf/config.ts`.
+- **npm module**: `npm pack` (the `prepack` script does a clean build) yields an
+  installable tarball; `npm i -g <tarball>` or `npm i <tarball>` gives a
+  `react-agent` bin usable from any directory. `files` ships `dist/`,
+  `system.txt` and each shipped agent's `agent.json`+`system.txt`; there are no
+  runtime dependencies. `build` cleans `dist/` first so stale compiles never
+  ship. The name `react-agent` is taken on npm — scope/rename before publishing.
 
 ## Roots (run from any project)
 

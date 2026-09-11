@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // CLI front-end: readline ⇄ orchestrator core (lib/orchestrator.ts). No agent
 // logic here — swap this file for an HTTP front-end and the core is unchanged.
 // Run: npm run build && node dist/agent.js [--new | --resume <convId>]

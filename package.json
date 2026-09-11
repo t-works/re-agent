@@ -1,8 +1,24 @@
 {
   "name": "react-agent",
-  "private": true,
+  "version": "0.1.0",
+  "description": "Minimal TypeScript multi-agent ReAct framework on the DeepSeek Responses API — runs from any project directory.",
+  "license": "MIT",
+  "bin": {
+    "react-agent": "dist/agent.js"
+  },
+  "files": [
+    "dist",
+    "system.txt",
+    "agents/*/agent.json",
+    "agents/*/system.txt"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
-    "build": "tsc",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc",
+    "prepack": "npm run build",
     "start": "node dist/agent.js",
     "smoke": "npm run build && node smoke.js"
   },
