@@ -25,6 +25,7 @@ function runPlink(h: SshHost, cmd: string): Promise<{ ok: boolean; output: strin
   });
 }
 
+const ADD_HOST_PROMPT = "To add a host to this tool add host data to conf/ssh-hosts.ts and restart the app." ;
 /**
  * Build the run_ssh tool from hosts with full credentials. Single host -> a
  * {command} arg; multiple hosts -> an explicit host arg. Returns undefined when
@@ -37,10 +38,10 @@ export function makeRunSshTool(): Tool | undefined {
   return {
     name: 'run_ssh',
     description: single
-      ? `Run a shell command over SSH on the remote host '${hosts[0].name}' (${hosts[0].host}).`
+      ? `Run a shell command over SSH on the remote host '${hosts[0].name}' (${hosts[0].host}). ${ADD_HOST_PROMPT}`
       : `Run a shell command over SSH on a remote host. Hosts: ${hosts
           .map((h) => `${h.name} (${h.host})`)
-          .join(', ')}. Pass the host name to pick one.`,
+          .join(', ')}. Pass the host name to pick one. ${ADD_HOST_PROMPT}`,
     parameters: {
       type: 'object',
       properties: {

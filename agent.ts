@@ -18,6 +18,11 @@ import { printLoopEvent } from './lib/react';
 import { STATE_ROOT, WORK_ROOT } from './lib/roots';
 import * as stm from './lib/stm';
 
+const REBOOT_COMMANDS = ['new', 'restart'] as const;
+const QUIT_COMMANDS = ['quit', 'exit', 'q'] as const;
+type RebootCommandNames = (typeof REBOOT_COMMANDS)[number];
+type CommandNames = RebootCommandNames | (typeof QUIT_COMMANDS)[number];
+
 if (!cfg.apiKey) { console.error('Set DEEPSEEK_API_KEY first.'); process.exit(1); }
 
 /** Conversation boot: --new = fresh, --resume <id> = pick one, bare start =
@@ -78,24 +83,32 @@ rl.on('close', () => { closed = true; });
 // sessions, then exit — or re-exec with --resume so boot-time state (agent
 // registry, compiled sub-agents) reloads while the conversation rides back in
 // from the short-term transcript. Runs only between turns (no approval pending).
-async function shutdown(restarting: boolean) {
+async function shutdown(command: CommandNames) {
   if (closed) return;
   closed = true;
   rl.close();
   const m = await orchestrator.finalize(sids).catch(() => null);
   if (m?.output && !m.output.startsWith('no memory')) console.log('\n' + m.output);
-  if (restarting) {
-    console.log(`\nRestarting — conversation ${convId} resumes from short-term memory.`);
-    // Detached + inherited stdio: the child keeps this terminal after we exit.
-    const child = spawn(process.execPath, [process.argv[1], '--resume', convId], { stdio: 'inherit', detached: true });
-    child.unref();
+
+  if (REBOOT_COMMANDS.includes(command as RebootCommandNames)) {
+    if(command === 'restart') {
+      console.log(`\nRestarting — conversation ${convId} resumes from short-term memory.`);
+      // Detached + inherited stdio: the child keeps this terminal after we exit.
+      const child = spawn(process.execPath, [process.argv[1], '--resume', convId], {stdio: 'inherit', detached: true});
+      child.unref();
+    } else if (command === 'new') {
+      console.log(`\nStarting new session.`);
+      // Detached + inherited stdio: the child keeps this terminal after we exit.
+      const child = spawn(process.execPath, [process.argv[1], '--new', convId], {stdio: 'inherit', detached: true});
+      child.unref();
+    }
   }
   process.exit(0);
 }
 
 const prompt = () => rl.question('\nYou: ', async (q) => {
   const cmd = q.trim().toLowerCase();
-  if (cmd === 'restart' || ['quit', 'exit', 'q'].includes(cmd)) return shutdown(cmd === 'restart');
+  if ([...REBOOT_COMMANDS, ...QUIT_COMMANDS].includes(cmd as CommandNames)) return shutdown(cmd as CommandNames);
   try {
     const result = await orchestrator.ask(q);
     sids.push(result.sid);
