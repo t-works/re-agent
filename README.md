@@ -20,7 +20,7 @@ At the moment I do not plan extending support for more providers.
 ## Install & run
 
 ```sh
-npm i -g react-agent        # or: npm i -g .   from a checkout
+npm npm i -g .        #from a checkout - not released to npm by purpose
 export DEEPSEEK_API_KEY=...
 cd my-project
 react-agent                 # bare start resumes this project's last conversation
