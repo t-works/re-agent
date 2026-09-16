@@ -45,6 +45,7 @@ runtime/agents/          create_agent output — writable state, under STATE_ROO
 memory/                  writable state, under STATE_ROOT: sessions/ (mailboxes +
                          per-session workspace/), agents/ (KB notes), conversations/
                          (short-term transcripts, lib/stm.ts)
+docs/                    reference notes (agent-design-patterns.md)
 docs/feat/               future-feature descriptions (write when deferring)
 smoke.js                 `npm run smoke` = build + off-line assertions
 README.md                npm-facing install/usage blurb
