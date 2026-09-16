@@ -4,3 +4,6 @@ dist/
 memory/
 runtime/
 .react/
+
+# test transcript that pastes a live PAT — never commit
+/docs/secrets-test.txt

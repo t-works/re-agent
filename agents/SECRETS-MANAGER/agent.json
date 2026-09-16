@@ -1,0 +1,4 @@
+{
+  "name": "secrets-manager",
+  "description": "GitHub Actions secrets manager — creates, updates, lists and deletes repository/environment/org secrets through the GitHub API, with the libsodium sealed-box encryption its set_github_secret tool performs. Delegate here whenever keys must actually be set on GitHub: the orchestrator has no secret-writing tool of its own. Name each key and say where its value lives (an env var name → from_env, a local file → from_file), never the value itself; every write pauses for human approval."
+}

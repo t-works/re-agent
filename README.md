@@ -6,7 +6,11 @@ If you encounter any issue or if you have a feature request describe it in issue
 
 One orchestrator loop answers each turn; it runs local shell commands, SSHes to
 configured hosts, `delegate`s to sub-agents, and can author new specialist
-agents at runtime with `create_agent`.
+agents at runtime with `create_agent`. Shipped sub-agents: `config-editor`
+(remote host configuration), `vision` (reads images) and `secrets-manager`
+(GitHub Actions secrets — every write is encrypted with a libsodium sealed box
+and paused for your approval; ask it to set a key by name, e.g. "set the
+DEEPSEEK_API_KEY repository secret for this repo from_env DEEPSEEK_API_KEY").
 
 Runs from any directory: the project you launch it in is the working directory,
 and all writable state (sessions, conversation memory, agents created in a
@@ -22,14 +26,16 @@ At the moment I do not plan extending support for more providers.
 ```sh
 npm npm i -g .        #from a checkout - not released to npm by purpose
 export DEEPSEEK_API_KEY=...
+export GITHUB_TOKEN=...     #optional: lets secrets-manager set GitHub secrets
+                            #alt: put a PAT in ./secrets/github-secrets-pat (git-ignored)
 cd my-project
 react-agent                 # bare start resumes this project's last conversation
 ```
 
 Useful flags and commands: `react-agent --new` starts a fresh conversation,
-`--resume <convId>` picks one; at the prompt `restart` reloads the process
-(agent registry, compiled sub-agents) keeping the conversation context, and
-`q` quits.
+`--resume <convId>` picks one; at the prompt `restart` reboots in place — it
+reloads the config, agent registry and compiled sub-agents from disk while
+keeping the conversation context — and `q` quits.
 
 ## Where state lives
 

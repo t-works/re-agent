@@ -376,6 +376,177 @@ const echoTool = {
   const pD = mkdtempSync(join(tmpdir(), 'rootsD-'));
   assert.notStrictEqual(roots.resolveStateRoot(pD, { REACT_HOME: rHome }), sC, 'different paths must not share state');
   for (const d of [pA, pB, pC, pD, rHome]) rmSync(d, { recursive: true, force: true });
+
+  // --- 17) GitHub secret tools: sealed-box crypto, approval gate, no value leaks ---
+  const ghsec = require('./dist/tools/github-secrets');
+  const sodium = require('libsodium-wrappers');
+  await sodium.ready; // libsodium-wrappers async init (same module the tool loads lazily)
+
+  // repo parsing (https and scp forms) — used to default the target repo
+  assert.strictEqual(ghsec.parseGithubRepo('https://github.com/t-works/re-agent.git'), 't-works/re-agent');
+  assert.strictEqual(ghsec.parseGithubRepo('git@github.com:t-works/re-agent.git'), 't-works/re-agent');
+  assert.strictEqual(ghsec.parseGithubRepo('https://gitlab.com/a/b.git'), '', 'non-github remotes have no github repo');
+  assert.strictEqual(ghsec.normalizeRepo('https://github.com/o/r.git'), 'o/r');
+  assert.strictEqual(ghsec.normalizeRepo('not a repo'), '', 'a malformed repo is rejected, not guessed');
+
+  // what we hand GitHub must be a sealed box the scope private key can open
+  const kp = sodium.crypto_box_keypair();
+  const pkB64 = sodium.to_base64(kp.publicKey, sodium.base64_variants.ORIGINAL);
+  const sealed = await ghsec.sealSecret('s3cret-value', pkB64);
+  const opened = sodium.crypto_box_seal_open(
+    sodium.from_base64(sealed, sodium.base64_variants.ORIGINAL), kp.publicKey, kp.privateKey
+  );
+  assert.strictEqual(sodium.to_string(opened), 's3cret-value', 'the sealed box must open with the box private key');
+  assert.ok(!sealed.includes('s3cret-value'), 'the ciphertext must not contain the plaintext');
+
+  const ghCalls = [];
+  let putStatus = 201; // GitHub: 201 create, 204 update
+  const ghFetch = async (url, init) => {
+    const u = String(url);
+    const method = (init && init.method) || 'GET';
+    ghCalls.push({
+      url: u, method,
+      body: init && init.body ? JSON.parse(init.body) : undefined,
+      auth: init && init.headers && init.headers.Authorization,
+    });
+    if (method === 'GET' && u.endsWith('/public-key'))
+      return { ok: true, status: 200, text: async () => JSON.stringify({ key_id: 'kid-1', key: pkB64 }) };
+    if (method === 'GET')
+      return { ok: true, status: 200, text: async () => JSON.stringify({ total_count: 1, secrets: [{ name: 'DEEPSEEK_API_KEY', updated_at: '2026-09-15T10:00:00Z' }] }) };
+    return { ok: true, status: method === 'PUT' ? putStatus : 204, text: async () => '' };
+  };
+
+  const asks = [];
+  let approved = true;
+  const ghTools = Object.fromEntries(
+    ghsec.makeGithubSecretsTools({
+      token: 'tok', repo: 't-works/re-agent', fetchImpl: ghFetch,
+      ask: async (q) => { asks.push(q); return approved; },
+    }).map((t) => [t.name, t])
+  );
+
+  // a denied approval stops the write before any network call, and carries no value
+  approved = false;
+  const denied = await ghTools.set_github_secret.run({ name: 'NPM_TOKEN', value: 'npm-secret' });
+  assert.strictEqual(denied.ok, false);
+  assert.ok(denied.output.includes('DENIED'), 'a denied write must report DENIED');
+  assert.strictEqual(ghCalls.length, 0, 'a denied write must not touch the network');
+  assert.strictEqual(asks.length, 1, 'a write must ask exactly once');
+  assert.ok(!JSON.stringify(asks).includes('npm-secret'), 'the approval prompt must never carry the value');
+  assert.ok(asks[0].command.includes('set secret NPM_TOKEN on repo t-works/re-agent'), 'the prompt must name key and target');
+
+  // malformed calls are rejected BEFORE the approval prompt — no wasted roundtrip
+  approved = true;
+  for (const [label, args] of [
+    ['missing value', { name: 'FOO' }],
+    ['ambiguous value', { name: 'FOO', value: 'a', from_env: 'PATH' }],
+    ['empty value', { name: 'FOO', value: '' }],
+    ['bad name', { name: '1BAD-NAME', value: 'a' }],
+    ['reserved name', { name: 'GITHUB_TOKEN', value: 'a' }],
+    ['unknown scope', { name: 'FOO', value: 'a', scope: 'nope' }],
+    ['environment without a name', { name: 'FOO', value: 'a', scope: 'environment' }],
+    ['org without an org', { name: 'FOO', value: 'a', scope: 'org' }],
+  ]) {
+    const before = asks.length;
+    const r = await ghTools.set_github_secret.run(args);
+    assert.strictEqual(r.ok, false, label + ' must fail');
+    assert.strictEqual(asks.length, before, label + ' must not reach the approval prompt');
+  }
+
+  // approved write: the value comes from the process env, is sealed, and the PUT carries key_id
+  process.env.SMOKE_GH_SECRET = 'env-value-42';
+  const set1 = await ghTools.set_github_secret.run({ name: 'DEEPSEEK_API_KEY', from_env: 'SMOKE_GH_SECRET' });
+  assert.strictEqual(set1.ok, true);
+  assert.ok(set1.output.includes('created'), 'a 201 PUT is a create');
+  assert.ok(!set1.output.includes('env-value-42'), 'the result must never echo the value');
+  const put = ghCalls[ghCalls.length - 1];
+  assert.strictEqual(put.method, 'PUT');
+  assert.strictEqual(put.url, 'https://api.github.com/repos/t-works/re-agent/actions/secrets/DEEPSEEK_API_KEY');
+  assert.strictEqual(put.body.key_id, 'kid-1', 'the PUT must echo the fetched key_id');
+  assert.ok(put.auth.startsWith('Bearer '), 'the request must be authenticated');
+  const roundTripped = sodium.to_string(
+    sodium.crypto_box_seal_open(sodium.from_base64(put.body.encrypted_value, sodium.base64_variants.ORIGINAL), kp.publicKey, kp.privateKey)
+  );
+  assert.strictEqual(roundTripped, 'env-value-42', 'the PUT body must carry the sealed value');
+
+  // from_file source, environment scope, and 204 → "updated"
+  const secretFile = pjoin(smokeState, 'secret-value.txt');
+  writeFileSync(secretFile, 'file-value\n');
+  putStatus = 204;
+  ghCalls.length = 0;
+  const set2 = await ghTools.set_github_secret.run({ name: 'NPM_TOKEN', from_file: secretFile, scope: 'environment', environment: 'production' });
+  assert.strictEqual(set2.ok, true);
+  assert.ok(set2.output.includes('updated'), 'a 204 PUT is an update');
+  assert.strictEqual(ghCalls[1].url, 'https://api.github.com/repos/t-works/re-agent/environments/production/secrets/NPM_TOKEN');
+  const fileSealed = sodium.to_string(
+    sodium.crypto_box_seal_open(sodium.from_base64(ghCalls[1].body.encrypted_value, sodium.base64_variants.ORIGINAL), kp.publicKey, kp.privateKey)
+  );
+  assert.strictEqual(fileSealed, 'file-value', 'the trailing newline of a value file must be dropped');
+
+  // list is read-only (no approval), hits the org scope, and reports names only
+  ghCalls.length = 0;
+  const asksBeforeList = asks.length;
+  const listed = await ghTools.list_github_secrets.run({ scope: 'org', org: 't-works' });
+  assert.strictEqual(listed.ok, true);
+  assert.strictEqual(asksBeforeList, asks.length, 'listing must not ask for approval');
+  assert.strictEqual(ghCalls[0].url, 'https://api.github.com/orgs/t-works/actions/secrets?per_page=100');
+  assert.ok(listed.output.includes('DEEPSEEK_API_KEY') && listed.output.includes('(updated 2026-09-15)'), 'list shows names + dates');
+
+  // delete is gated too: denied = no call, approved = DELETE on the repo scope
+  approved = false;
+  ghCalls.length = 0;
+  const delDenied = await ghTools.delete_github_secret.run({ name: 'NPM_TOKEN' });
+  assert.strictEqual(delDenied.ok, false);
+  assert.ok(delDenied.output.includes('DENIED'));
+  assert.strictEqual(ghCalls.length, 0, 'a denied delete must not touch the network');
+  approved = true;
+  const del = await ghTools.delete_github_secret.run({ name: 'NPM_TOKEN' });
+  assert.strictEqual(del.ok, true);
+  assert.strictEqual(ghCalls[ghCalls.length - 1].method, 'DELETE');
+  assert.strictEqual(ghCalls[ghCalls.length - 1].url, 'https://api.github.com/repos/t-works/re-agent/actions/secrets/NPM_TOKEN');
+
+  // GitHub errors surface as ok:false with the reason — never an exception
+  const failing = Object.fromEntries(
+    ghsec.makeGithubSecretsTools({
+      token: 'tok', repo: 't-works/re-agent', ask: async () => true,
+      fetchImpl: async () => ({ ok: false, status: 403, text: async () => JSON.stringify({ message: 'Resource not accessible by personal access token' }) }),
+    }).map((t) => [t.name, t])
+  );
+  const forbid = await failing.set_github_secret.run({ name: 'FOO', value: 'v' });
+  assert.strictEqual(forbid.ok, false);
+  assert.ok(forbid.output.includes('403') && forbid.output.includes('Secrets: write'), '403 must explain the missing permission');
+  const broken = Object.fromEntries(
+    ghsec.makeGithubSecretsTools({
+      token: 'tok', repo: 't-works/re-agent', ask: async () => true,
+      fetchImpl: async () => { throw new Error('ENOTFOUND api.github.com'); },
+    }).map((t) => [t.name, t])
+  );
+  const offline = await broken.set_github_secret.run({ name: 'FOO', value: 'v' });
+  assert.strictEqual(offline.ok, false);
+  assert.ok(offline.output.includes('request to GitHub failed'), 'a network failure must be reported, not thrown');
+
+  // no token in the environment: refuse locally with an actionable message, no network
+  const savedTokens = { GITHUB_TOKEN: process.env.GITHUB_TOKEN, GH_TOKEN: process.env.GH_TOKEN };
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.GH_TOKEN;
+  const noToken = Object.fromEntries(
+    ghsec.makeGithubSecretsTools({ repo: 't-works/re-agent', ask: async () => true, fetchImpl: ghFetch }).map((t) => [t.name, t])
+  );
+  ghCalls.length = 0;
+  const noTok = await noToken.set_github_secret.run({ name: 'FOO', value: 'v' });
+  assert.strictEqual(noTok.ok, false);
+  assert.ok(noTok.output.includes('No GitHub token'), 'a missing token must be explained');
+  assert.strictEqual(ghCalls.length, 0, 'no token = no network call');
+  if (savedTokens.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN; else process.env.GITHUB_TOKEN = savedTokens.GITHUB_TOKEN;
+  if (savedTokens.GH_TOKEN === undefined) delete process.env.GH_TOKEN; else process.env.GH_TOKEN = savedTokens.GH_TOKEN;
+  delete process.env.SMOKE_GH_SECRET;
+
+  // the owning agent is registered, and secret writing stays out of the data-agent pool
+  const secretsAgent = orch3.agents.find((a) => a.name === 'secrets-manager');
+  assert.ok(secretsAgent, 'secrets-manager must be registered');
+  assert.strictEqual(secretsAgent.hasMemory, false, 'secrets-manager needs no memory hub');
+  assert.ok(!POOL_NAMES.includes('set_github_secret'), 'secret writing must not be a pool capability');
+
   rmSync(smokeState, { recursive: true, force: true }); // throwaway state, never a real project's
 
   console.log(`smoke ok — core silent, ${orch.agents.length} sub-agents registered`);

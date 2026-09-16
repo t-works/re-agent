@@ -32,6 +32,7 @@ tools/ssh.ts             run_ssh tool (plink → conf/ssh-hosts.ts)
 tools/view-image.ts      view_image tool (local image → vision model input)
 tools/artifact.ts        read/write_artifact tools (workspace file handoffs)
 tools/pool.ts            data-agent tool pool: POOL_NAMES + buildAgentTools
+tools/github-secrets.ts  set/list/delete_github_secret: GitHub API, libsodium sealed box, approval-gated
 agents/<SUB-AGENT>/     one dir per sub-agent, e.g. agents/CONFIG-EDITOR/
   agent.json             { name, description, hasMemory, tools?, model?, reasoningEffort? }
   system.txt             that agent's system prompt
@@ -52,8 +53,9 @@ README.md                npm-facing install/usage blurb
   state dirs `memory/` + `runtime/` are excluded — they are data, not source)
 - `node dist/agent.js [--new | --resume <convId>]` — CLI. Requires
   `DEEPSEEK_API_KEY`. A bare start resumes the last conversation; `--new`
-  starts fresh. At the prompt, `restart` re-execs the process so boot-time
-  state (agent registry, compiled sub-agents) reloads — conversation context
+  starts fresh. At the prompt, `restart` reboots in place (it drops its own
+  compiled modules and boots again) so boot-time state (config, agent registry,
+  compiled sub-agents) reloads — conversation context
   rides back in from short-term memory (see below). Run it from the project
   you want it to work on (`cd myproj && node <install>/dist/agent.js`):
   commands run there and state resolves per project (see Roots).
@@ -64,8 +66,10 @@ README.md                npm-facing install/usage blurb
 - **npm module**: `npm pack` (the `prepack` script does a clean build) yields an
   installable tarball; `npm i -g <tarball>` or `npm i <tarball>` gives a
   `react-agent` bin usable from any directory. `files` ships `dist/`,
-  `system.txt` and each shipped agent's `agent.json`+`system.txt`; there are no
-  runtime dependencies. `build` cleans `dist/` first so stale compiles never
+  `system.txt` and each shipped agent's `agent.json`+`system.txt`. Runtime
+  dependencies: one — `libsodium-wrappers` (sealed-box encryption for GitHub
+  secrets, `tools/github-secrets.ts`), which is `import()`ed lazily so nothing
+  else pays for it. `build` cleans `dist/` first so stale compiles never
   ship. The name `react-agent` is taken on npm — scope/rename before publishing.
 
 ## Roots (run from any project)
@@ -193,8 +197,13 @@ last 10 turns (`lib/stm.ts` → `recentContext`, clipped per field) and hands
 `resumeContext` to the orchestrator, which appends it to the system prompt —
 so a restarted process knows what the conversation covered. Restoration is
 deliberately lossy-but-cheap (recent gist, not replay); the full transcript
-stays on disk. `restart` finalizes this process's long-term memory, re-execs
-with `--resume <convId>` (detached, inherited stdio), and exits. Raw + rolling
+stays on disk. `restart` finalizes this process's long-term memory, then
+reboots in place: it purges its own compiled modules from the require cache,
+boots again on the same `convId` (context rides back in from the transcript)
+and keeps the terminal and stdin it already has. No second process — a spawned
+child on Windows either loses that terminal (detached → not attached to its
+console) or dies with it when this process exits (attached), which is exactly
+why the old re-exec printed "Restarting" and then appeared to do nothing. Raw + rolling
 on purpose: compaction into summaries is future work, and conversations that
 outgrow the 10-turn window simply forget their oldest context. For durable
 work beyond the gist, the system prompt tells the orchestrator to checkpoint
@@ -224,6 +233,19 @@ for the crash-recovery ladder and the full mid-turn replay idea).
   pinned in prompts; never route remote config work through run_command.
 - Secrets are env vars named in `conf/ssh-hosts.ts` (`WARSZAWA-SMALL-HOST`,
   `-USER`, `-PASS`). Never put a secret literal in code or memory.
+- **GitHub secrets** are the one place a secret value must leave the machine, so
+  they get their own tool + owner: `tools/github-secrets.ts`
+  (`set_github_secret` / `list_github_secrets` / `delete_github_secret`, libsodium
+  sealed box over the scope's public key) and the `agents/SECRETS-MANAGER` agent
+  that holds it — deliberately absent from `tools/pool.ts`, so neither the
+  orchestrator nor a `create_agent` data agent can write secrets; delegate
+  instead. Requires `GITHUB_TOKEN` (or `GH_TOKEN`) with secrets write access
+  (repo admin; org admin for org scope) — or, when no env token is set, the
+  git-ignored PAT file `secrets/github-secrets-pat` that the agent passes to the
+  tool as `tokenFile`; only the path travels, never the value. Every write/delete rides the mailbox
+  approval gate. Values are sourced inside the tool — `from_env` /
+  `from_file` keep the plaintext out of the model's context — and are never
+  echoed back (GitHub's API is write-only for values anyway).
 
 ## House rules
 
