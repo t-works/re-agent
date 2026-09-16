@@ -7,3 +7,4 @@ runtime/
 
 # test transcript that pastes a live PAT — never commit
 /docs/secrets-test.txt
+/docs/
