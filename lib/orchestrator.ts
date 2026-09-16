@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { isAbsolute, join, relative } from 'path';
 import { reactLoop } from './react';
 import type { LoopEvent, Tool } from './react';
+import { makeTraceSink, type TraceSink, type TraceTotals } from './trace';
 import { runCommand } from '../tools/run-command';
 import { makeRunSshTool } from '../tools/ssh';
 import { POOL_NAMES } from '../tools/pool';
@@ -77,7 +78,12 @@ export function createOrchestrator(
   }
 
   /** Hand a task to a sub-agent through the session mailbox (native structured args — no text parsing). */
-  async function delegate(name: string, task: string, sessionDir: string): Promise<{ ok: boolean; output: string }> {
+  async function delegate(
+    name: string,
+    task: string,
+    sessionDir: string,
+    trace?: TraceSink | null
+  ): Promise<{ ok: boolean; output: string }> {
     if (!name || !task) return { ok: false, output: 'Usage: delegate with a name and a task' };
     // Fresh scan: an agent created earlier in this same turn must be delegatable now.
     const agent = loadRegistry().find((a) => a.name === name);
@@ -115,6 +121,7 @@ export function createOrchestrator(
     const entryArgs = existsSync(agentJs)
       ? [agentJs, taskDir]
       : [join(__dirname, '..', 'runner.js'), agent.dir, taskDir];
+    const spawnStart = performance.now();
     await new Promise<void>((resolve) => {
       // Pipe the sub-agent's trace back through emit (instead of stdio inherit) so an
       // API front-end receives it as events rather than writing to server stdout.
@@ -156,10 +163,17 @@ export function createOrchestrator(
       });
     });
 
+    const spawnMs = performance.now() - spawnStart;
     try {
-      const result = JSON.parse(readFileSync(join(taskDir, 'result.json'), 'utf8')) as { ok: boolean; output: string };
+      const result = JSON.parse(readFileSync(join(taskDir, 'result.json'), 'utf8')) as {
+        ok: boolean;
+        output: string;
+        trace?: TraceTotals; // the child's own totals (runner writes them) — no cross-file read needed
+      };
+      trace?.delegate({ to: agent.name, tid, ms: spawnMs, ok: result.ok, child: result.trace });
       return { ok: result.ok, output: `[${agent.name}] ${result.output}` };
     } catch {
+      trace?.delegate({ to: agent.name, tid, ms: spawnMs, ok: false });
       return { ok: false, output: `${agent.name} agent crashed without a result (${relative(STATE_ROOT, taskDir)})` };
     }
   }
@@ -178,6 +192,13 @@ export function createOrchestrator(
       emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(STATE_ROOT, sessionDir)})\n` });
       const systemPrompt = buildSystemPrompt(); // fresh roster each turn: created agents appear next turn
 
+      // This turn's trace: model/tool/delegate records, then one turn record last.
+      // Best-effort — a null sink (REACT_TRACE=0) just means no file and no summary.
+      const trace = makeTraceSink(join(sessionDir, 'trace.jsonl'), { agent: 'orchestrator', sid });
+      const emitTrace = (t: { line: string } | null) => {
+        if (t) emit?.({ kind: 'note', content: t.line + '\n' });
+      };
+
       const delegateTool: Tool = {
         name: 'delegate',
         description: loadRegistry().length
@@ -191,7 +212,7 @@ export function createOrchestrator(
           },
           required: ['name', 'task'],
         },
-        run: (args) => delegate(String(args.name ?? ''), String(args.task ?? ''), sessionDir),
+        run: (args) => delegate(String(args.name ?? ''), String(args.task ?? ''), sessionDir, trace),
       };
 
       const runSsh = makeRunSshTool();
@@ -266,15 +287,20 @@ export function createOrchestrator(
           task: question,
           tools,
           onEvent: (e) => emit?.(e),
+          trace,
           model: cfg.orchestratorModel,
           reasoningEffort: cfg.orchestratorReasoningEffort,
         });
       } catch (e) {
+        // A crashed/wedged turn still gets its turn record (and its summary), so
+        // the failure is measurable on disk, not just remembered. See tracing-PRD.
+        emitTrace(trace?.turn({ ok: false, sid, convId: opts.convId, question }) ?? null);
         if (opts.convId) {
           try { updateLastTurn(opts.convId, { output: 'ERROR: ' + (e as Error).message }); } catch { /* ignore */ }
         }
         throw e;
       }
+      emitTrace(trace?.turn({ ok: result.ok, sid, convId: opts.convId, question }) ?? null);
       if (opts.convId) {
         try { updateLastTurn(opts.convId, { output: result.output }); } catch { /* ignore */ }
       }

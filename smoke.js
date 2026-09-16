@@ -547,6 +547,107 @@ const echoTool = {
   assert.strictEqual(secretsAgent.hasMemory, false, 'secrets-manager needs no memory hub');
   assert.ok(!POOL_NAMES.includes('set_github_secret'), 'secret writing must not be a pool capability');
 
+  // --- 18) Tracing: per-process JSONL, usage capture, one-line turn summary ---
+  const { makeTraceSink, inputBreakdown } = require('./dist/lib/trace');
+  const traceEnv = process.env.REACT_TRACE;
+  const traceFile = (rootDir, sid) => join(rootDir, 'memory', 'sessions', sid, 'trace.jsonl');
+  const readRecs = (f) => readFileSync(f, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  process.env.REACT_TRACE = 'full';
+
+  // 18a) a full turn: model record with usage + sizes, turn record last, summary emitted
+  const tnotes = [];
+  const withUsage = resp(msg('traced answer'));
+  withUsage.usage = { input_tokens: 4210, output_tokens: 310, total_tokens: 4520 };
+  global.fetch = makeFetch([withUsage]);
+  const torch = createOrchestrator((e) => tnotes.push(e));
+  const tr = await torch.ask('how big is my context?');
+  const recs = readRecs(traceFile(roots.STATE_ROOT, tr.sid));
+  assert.strictEqual(recs.length, 2, 'one turn = one model record + one turn record');
+  const mrec = recs[0];
+  assert.strictEqual(mrec.kind, 'model');
+  assert.strictEqual(mrec.agent, 'orchestrator');
+  assert.strictEqual(mrec.sid, tr.sid);
+  assert.strictEqual(mrec.usage.input_tokens, 4210, 'usage must be captured verbatim');
+  assert.strictEqual(mrec.inputItems, 1, 'first request carries just the task');
+  assert.ok(mrec.reqBytes > 0 && mrec.ms >= 0, 'request size and latency must be recorded');
+  assert.ok(mrec.tools >= 3, 'tool count must be recorded');
+  assert.ok(mrec.inputBreakdown.instructions > 0 && mrec.inputBreakdown.task > 0, 'context must be attributed by category');
+  const trec = recs[1];
+  assert.strictEqual(trec.kind, 'turn', 'the turn record must be last');
+  assert.strictEqual(trec.inputTokens, 4210);
+  assert.strictEqual(trec.outputTokens, 310);
+  assert.strictEqual(trec.modelCalls, 1);
+  assert.strictEqual(trec.iterations, 1);
+  assert.strictEqual(trec.usageMissing, 0);
+  assert.strictEqual(trec.questionChars, 'how big is my context?'.length);
+  const tline = tnotes.map((e) => e.content).filter((c) => typeof c === 'string').find((c) => c.includes('trace:'));
+  assert.ok(tline && tline.includes('in 4.2k tok / out 310 tok') && tline.includes('trace.jsonl'), 'turn summary note missing or wrong: ' + tline);
+
+  // 18b) no usage in the response: no throw, counted as missing, turn still closes
+  global.fetch = makeFetch([resp(msg('no usage here'))]);
+  const tr2 = await createOrchestrator().ask('plain');
+  const recs2 = readRecs(traceFile(roots.STATE_ROOT, tr2.sid));
+  assert.strictEqual(recs2.length, 2, 'missing usage must not drop records');
+  assert.strictEqual(recs2[1].usageMissing, 1);
+  assert.strictEqual(recs2[1].inputTokens, 0);
+
+  // 18c) tool records: an unknown tool is traced as a failure and the loop recovers
+  global.fetch = makeFetch([resp(fnCall('c1', 'ghost', '{}')), resp(msg('recovered'))]);
+  const tr3 = await createOrchestrator().ask('call a tool');
+  const recs3 = readRecs(traceFile(roots.STATE_ROOT, tr3.sid));
+  const toolRec = recs3.find((r) => r.kind === 'tool');
+  assert.ok(toolRec, 'tool calls must be traced');
+  assert.strictEqual(toolRec.name, 'ghost');
+  assert.strictEqual(toolRec.ok, false);
+  assert.strictEqual(toolRec.iter, 0);
+  assert.ok(toolRec.outBytes > 0 && typeof toolRec.ms === 'number');
+  assert.ok(toolRec.output.includes('Unknown tool'), 'REACT_TRACE=full must carry a clipped snippet');
+  assert.strictEqual(recs3[recs3.length - 1].toolCalls, 1);
+  assert.strictEqual(recs3[recs3.length - 1].modelCalls, 2);
+
+  // 18d) REACT_TRACE=0: no file, no summary line
+  process.env.REACT_TRACE = '0';
+  const qnotes = [];
+  global.fetch = makeFetch([resp(msg('quiet'))]);
+  const tr4 = await createOrchestrator((e) => qnotes.push(e)).ask('quiet turn');
+  assert.strictEqual(existsSync(traceFile(roots.STATE_ROOT, tr4.sid)), false, 'REACT_TRACE=0 must write nothing');
+  assert.ok(!qnotes.some((e) => typeof e.content === 'string' && e.content.includes('trace:')), 'REACT_TRACE=0 must silence the summary');
+
+  // 18e) unwritable trace path: best-effort, turn survives
+  process.env.REACT_TRACE = 'full';
+  const blocker = join(smokeState, 'not-a-dir');
+  writeFileSync(blocker, 'x');
+  const badSink = makeTraceSink(join(blocker, 'trace.jsonl'), { agent: 't' });
+  assert.ok(badSink, 'a sink is still returned when the path is bad');
+  const badTurn = badSink.turn({ ok: true });
+  assert.ok(badTurn.line.includes('WRITE FAILED'), 'a failed write must be reported, not thrown');
+
+  // 18f) tracing must not change the request body it measures
+  const payloads = [];
+  global.fetch = async (_url, init) => {
+    payloads.push(init.body);
+    return { ok: true, json: async () => resp(msg('x')) };
+  };
+  await reactLoop({ systemPrompt: 'sys', task: 'tk', tools: [echoTool] });
+  const untraced = payloads.shift();
+  const okSink = makeTraceSink(join(smokeState, 'bytes.jsonl'), { agent: 't' });
+  await reactLoop({ systemPrompt: 'sys', task: 'tk', tools: [echoTool], trace: okSink });
+  assert.strictEqual(payloads.shift(), untraced, 'the traced request must be byte-identical');
+  assert.deepStrictEqual(
+    Object.keys(inputBreakdown('sys', [{ role: 'user', content: 't' }])).sort(),
+    ['instructions', 'task'],
+    'inputBreakdown must classify the request categories'
+  );
+
+  // 18g) the child's totals ride back in result.json (the parent's roll-up source)
+  const tray = mkdtempSync(join(tmpdir(), 'tray-'));
+  writeResult(tray, { id: 't1', from: 'a', ok: true, output: 'o', log: [], trace: { ms: 5, iterations: 1, modelCalls: 1, toolCalls: 0, modelMs: 5, toolMs: 0, inputTokens: 7, outputTokens: 3, usageMissing: 0 } });
+  const trayRes = JSON.parse(readFileSync(join(tray, 'result.json'), 'utf8'));
+  assert.strictEqual(trayRes.trace.inputTokens, 7, 'child totals must survive the mailbox roundtrip');
+  rmSync(tray, { recursive: true, force: true });
+
+  if (traceEnv === undefined) delete process.env.REACT_TRACE; else process.env.REACT_TRACE = traceEnv;
+
   rmSync(smokeState, { recursive: true, force: true }); // throwaway state, never a real project's
 
   console.log(`smoke ok — core silent, ${orch.agents.length} sub-agents registered`);

@@ -24,6 +24,9 @@ lib/roots.ts             CODE_ROOT / WORK_ROOT / STATE_ROOT resolution (run from
 lib/guard.ts             guardrail classification + approval gates (deny/ask)
 lib/memory.ts            hub-and-spoke memory store, tools, memoryWriter prompt
 lib/stm.ts               short-term conversation transcript (restart continuity)
+lib/trace.ts             run tracing: per-process JSONL (model/tool/delegate/turn
+                         records) + the one-line turn summary; REACT_TRACE=0|full.
+                         Design + deferred reader work: docs/feat/tracing-PRD.md
 conf/config.ts           model/API config (env-driven)
 conf/ssh-hosts.ts        SSH hosts; secrets = env var NAMES, never values
 conf/guardrails.ts       deny/ask command policy (edit freely)
@@ -209,6 +212,20 @@ outgrow the 10-turn window simply forget their oldest context. For durable
 work beyond the gist, the system prompt tells the orchestrator to checkpoint
 long builds into a PLAN.md-style file inside the project (see docs/feat/turn-recovery.md
 for the crash-recovery ladder and the full mid-turn replay idea).
+
+## Tracing (capture only — the reader is deferred)
+
+Every model call, tool call, delegation and turn is appended as one JSON line:
+`memory/sessions/<sid>/trace.jsonl` for the orchestrator turn,
+`agent-tasks/<tid>/trace.jsonl` per spawned sub-agent (one writer process per
+file, so no locks). Records carry sizes, counts, latencies and `usage` tokens —
+never payloads; `REACT_TRACE=full` adds clipped (200-char) args/output snippets.
+Each turn prints one summary line through the existing `note` event, and the
+child's totals ride back in `result.json`, so the parent's `delegate` record
+answers "how long, how many tokens" without reading the child's file. Capture is
+best-effort: a failed write never fails a turn. Aggregation/reporting over these
+files is Phase 2 (see `docs/feat/tracing-PRD.md`) — do not add a second write
+path for a reader.
 
 ## Dynamic agents & artifact handoffs
 

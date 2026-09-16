@@ -13,6 +13,7 @@ import { reactLoop, printLoopEvent } from './lib/react';
 import { makeMailboxAsker } from './lib/guard';
 import { memoryHubSection } from './lib/memory';
 import { readTask, writeResult } from './lib/task';
+import { makeTraceSink } from './lib/trace';
 import { buildAgentTools } from './tools/pool';
 
 if (!cfg.apiKey) { console.error('Set DEEPSEEK_API_KEY first.'); process.exit(1); }
@@ -45,15 +46,23 @@ async function main() {
   const systemPrompt =
     readFileSync(join(agentSrcDir, 'system.txt'), 'utf8') + (hasMemory ? memoryHubSection(name) : '');
 
+  // Trace lands next to this delegation's mailbox: one writer process per file,
+  // read by the parent (its delegate record) and by anyone drilling in by tid.
+  const trace = makeTraceSink(join(taskDir, 'trace.jsonl'), { agent: name, tid: task.id });
   const result = await reactLoop({
     systemPrompt,
     task: task.task,
     tools,
     onEvent: printLoopEvent,
+    trace,
     model: task.model,
     reasoningEffort: task.reasoningEffort,
   });
-  writeResult(taskDir, { id: task.id, from: name, ok: result.ok, output: result.output, log: result.log });
+  const turn = trace?.turn({ ok: result.ok }); // totals ride back in result.json for the parent's roll-up
+  writeResult(taskDir, {
+    id: task.id, from: name, ok: result.ok, output: result.output, log: result.log,
+    ...(turn ? { trace: turn.totals } : {}),
+  });
   process.exit(result.ok ? 0 : 1);
 }
 

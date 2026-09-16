@@ -5,6 +5,7 @@
 // passing task.model to reactLoop (reactLoop falls back to cfg defaults).
 import { readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import type { TraceTotals } from './trace';
 
 export type SubTask = {
   id: string;
@@ -24,7 +25,7 @@ export function readTask(taskDir: string): SubTask {
 /** Write result.json into the mailbox dir (what delegate() waits for). */
 export function writeResult(
   taskDir: string,
-  r: { id: string; from: string; ok: boolean; output: string; log: string[] }
+  r: { id: string; from: string; ok: boolean; output: string; log: string[]; trace?: TraceTotals }
 ): void {
   writeFileSync(join(taskDir, 'result.json'), JSON.stringify(r, null, 2));
 }

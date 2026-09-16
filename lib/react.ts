@@ -4,6 +4,7 @@
 // function_call_output item, and repeat until the model answers with a plain
 // message. Stateless: the full history rides along in `input` every request.
 import cfg from '../conf/config';
+import { inputBreakdown, type TraceSink, type TraceUsage } from './trace';
 
 export type Tool = {
   name: string;
@@ -72,6 +73,7 @@ type ResponseBody = {
   output: OutItem[];
   incomplete_details?: { reason?: string } | null;
   error?: { message?: string } | null;
+  usage?: TraceUsage; // present in practice, but never required: absent usage must not break a turn
 };
 
 /** Post one stateless turn to /responses and return the (completed) response. */
@@ -81,34 +83,59 @@ async function postResponses(opts: {
   instructions: string;
   input: InputItem[];
   tools: Tool[];
+  iter: number;
+  trace?: TraceSink | null;
 }): Promise<ResponseBody> {
-  const res = await fetch(cfg.baseURL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-    // No timeout = a stalled connection hangs the whole turn forever (seen live:
-    // an idle process with no children, wedged mid-fetch). 5 min is generous for
-    // a long effort-high reasoning response; a dead socket errors instead of hangs.
-    signal: AbortSignal.timeout(300_000),
-    body: JSON.stringify({
-      model: opts.model,
-      reasoning: { effort: opts.reasoningEffort },
-      instructions: opts.instructions,
-      input: opts.input,
-      tools: opts.tools.map((t) => ({
-        type: 'function',
-        name: t.name,
-        description: t.description,
-        parameters: t.parameters,
-      })),
-      max_output_tokens: cfg.maxOutputTokens,
-    }),
+  // Serialize once so the request can be measured (tracing) without changing it.
+  const payload = JSON.stringify({
+    model: opts.model,
+    reasoning: { effort: opts.reasoningEffort },
+    instructions: opts.instructions,
+    input: opts.input,
+    tools: opts.tools.map((t) => ({
+      type: 'function',
+      name: t.name,
+      description: t.description,
+      parameters: t.parameters,
+    })),
+    max_output_tokens: cfg.maxOutputTokens,
   });
-  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
-  const body = (await res.json()) as ResponseBody;
-  if (body.status === 'failed') throw new Error(`API failed: ${body.error?.message ?? 'unknown error'}`);
-  if (body.status === 'incomplete')
-    throw new Error(`API incomplete: ${body.incomplete_details?.reason ?? 'unknown reason'}`);
-  return body;
+  const t0 = performance.now();
+  let usage: TraceUsage | undefined;
+  let ok = false;
+  try {
+    const res = await fetch(cfg.baseURL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      // No timeout = a stalled connection hangs the whole turn forever (seen live:
+      // an idle process with no children, wedged mid-fetch). 5 min is generous for
+      // a long effort-high reasoning response; a dead socket errors instead of hangs.
+      signal: AbortSignal.timeout(300_000),
+      body: payload,
+    });
+    if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+    const body = (await res.json()) as ResponseBody;
+    usage = body.usage; // captured before the status checks: a failed response still counts
+    if (body.status === 'failed') throw new Error(`API failed: ${body.error?.message ?? 'unknown error'}`);
+    if (body.status === 'incomplete')
+      throw new Error(`API incomplete: ${body.incomplete_details?.reason ?? 'unknown reason'}`);
+    ok = true;
+    return body;
+  } finally {
+    // Recorded on every path — a wedged call must show up as a ~300000 ms record.
+    opts.trace?.model({
+      iter: opts.iter,
+      model: opts.model,
+      effort: opts.reasoningEffort,
+      reqBytes: Buffer.byteLength(payload),
+      inputItems: opts.input.length,
+      tools: opts.tools.length,
+      ms: performance.now() - t0,
+      ok,
+      usage,
+      inputBreakdown: inputBreakdown(opts.instructions, opts.input),
+    });
+  }
 }
 
 /** Run a tool against parsed, validated JSON args; any failure becomes tool output so the model can recover. */
@@ -139,6 +166,7 @@ export async function reactLoop({
   task,
   tools,
   onEvent,
+  trace,
   model,
   reasoningEffort,
 }: {
@@ -146,6 +174,7 @@ export async function reactLoop({
   task: string;
   tools: Tool[];
   onEvent?: (e: LoopEvent) => void;
+  trace?: TraceSink | null;
   model?: string;
   reasoningEffort?: string;
 }): Promise<LoopResult> {
@@ -165,6 +194,8 @@ export async function reactLoop({
       instructions: systemPrompt,
       input: history,
       tools,
+      iter: i,
+      trace,
     });
     const calls = body.output.filter((o): o is Extract<OutItem, { type: 'function_call' }> => o.type === 'function_call');
     const texts = body.output
@@ -196,9 +227,14 @@ export async function reactLoop({
     const done: { call: (typeof calls)[number]; result: ToolResult }[] = [];
     for (const call of calls) {
       const tool = tools.find((t) => t.name === call.name);
+      const t0 = performance.now();
       const result = tool
         ? await runSafely(tool, call.arguments)
         : { ok: false, output: `Unknown tool: ${call.name}. Known: ${tools.map((t) => t.name).join(', ')}` };
+      trace?.tool({
+        iter: i, name: call.name, args: call.arguments, output: result.output,
+        ok: result.ok, ms: performance.now() - t0, image: !!result.image,
+      });
       done.push({ call, result });
       onEvent?.({ kind: 'observation', ok: result.ok, output: result.output });
       log.push(`Observation: ${result.ok ? 'ok' : 'ERROR'}: ${result.output || '(empty)'}`);
