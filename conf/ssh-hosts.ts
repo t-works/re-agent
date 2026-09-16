@@ -15,7 +15,7 @@ export const sshHosts: SshHost[] = [
     {
     name: 'cats',
     host: env('CAT-HOST'),
-    user: env('CAT-HOST-PASS'),
+    user: env('CAT-HOST-USER'),
     pass: env('CAT-HOST-PASS'),
     port: env('CAT-HOST-PORT'),
   },
