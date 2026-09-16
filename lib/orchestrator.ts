@@ -3,7 +3,7 @@
 // Transport-free — no stdin/stdout/readline here. CLI (agent.ts) and a future
 // API front-end both call createOrchestrator().ask().
 // Memory layout (all under STATE_ROOT, see lib/roots.ts):
-//   memory/sessions/session-list.json              [{ session-uuid }]
+//   memory/sessions/session-list.json              [{ session-uuid, datetime }]
 //   memory/sessions/<session-uuid>/agent-tasks/<task-uuid>/{task,result}.json
 //   memory/conversations/<convId>/transcript.jsonl short-term Q/A log (lib/stm.ts)
 import { spawn } from 'child_process';
@@ -33,7 +33,7 @@ const HOME_AGENTS_ROOT = join(HOME_ROOT, 'agents');
 const SESSIONS_ROOT = join(STATE_ROOT, 'memory', 'sessions');
 
 export type AgentDef = { name: string; description: string; dir: string; hasMemory: boolean; model?: string; reasoningEffort?: string };
-type SessionEntry = { 'session-uuid': string };
+type SessionEntry = { 'session-uuid': string; datetime: string };
 
 // Loop events plus pre-formatted side notes (session banner, sub-agent trace).
 export type TurnEvent = LoopEvent | { kind: 'note'; content: string };
@@ -187,7 +187,7 @@ export function createOrchestrator(
       mkdirSync(join(sessionDir, 'agent-tasks'), { recursive: true });
       mkdirSync(join(sessionDir, 'workspace'), { recursive: true }); // artifact handoff dir for delegated agents
       const sessions = readJson<SessionEntry[]>(join(SESSIONS_ROOT, 'session-list.json'), []);
-      sessions.push({ 'session-uuid': sid });
+      sessions.push({ 'session-uuid': sid, datetime: new Date().toISOString() });
       writeFileSync(join(SESSIONS_ROOT, 'session-list.json'), JSON.stringify(sessions, null, 2));
       emit?.({ kind: 'note', content: `\nSession ${sid} (${relative(STATE_ROOT, sessionDir)})\n` });
       const systemPrompt = buildSystemPrompt(); // fresh roster each turn: created agents appear next turn
