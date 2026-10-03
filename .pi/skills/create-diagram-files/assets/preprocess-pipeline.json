@@ -1,0 +1,116 @@
+{
+  "specVersion": "1",
+  "meta": {
+    "id": "preprocess-pipeline",
+    "title": "Preprocess Pipeline",
+    "order": 10,
+    "description": "How raw data becomes training tensors. Blue boxes are steps, violet containers are pipeline stages, the dashed edge is a side channel of metrics."
+  },
+  "direction": "LR",
+  "nodes": [
+    {
+      "id": "raw",
+      "kind": "source",
+      "label": "Raw data",
+      "outputs": [{ "id": "out", "label": "raw" }],
+      "sections": [
+        {
+          "id": "sources",
+          "label": "Sources",
+          "items": ["s3://raw/logs/", "s3://raw/events/"]
+        }
+      ]
+    },
+    {
+      "id": "pre",
+      "kind": "group",
+      "label": "Preprocess",
+      "color": "violet"
+    },
+    {
+      "id": "load",
+      "kind": "task",
+      "parent": "pre",
+      "label": "Load",
+      "inputs": [{ "id": "in", "label": "raw" }],
+      "outputs": [{ "id": "out", "label": "rows" }],
+      "sections": [
+        {
+          "id": "files",
+          "label": "Files",
+          "open": true,
+          "items": ["raw.csv", "events.parquet"]
+        }
+      ]
+    },
+    {
+      "id": "norm",
+      "kind": "task",
+      "parent": "pre",
+      "label": "Normalize",
+      "inputs": [{ "id": "in", "label": "rows" }],
+      "outputs": [
+        { "id": "out", "label": "tensors" },
+        { "id": "metrics", "label": "stats" }
+      ],
+      "color": "blue"
+    },
+    {
+      "id": "features",
+      "kind": "store",
+      "label": "Feature store",
+      "color": "violet",
+      "inputs": [{ "id": "in", "label": "tensors" }],
+      "outputs": [{ "id": "out", "label": "features" }],
+      "sections": [
+        {
+          "id": "keys",
+          "label": "Keys",
+          "items": ["user_id", "session_id"]
+        }
+      ]
+    },
+    {
+      "id": "train",
+      "kind": "service",
+      "label": "Trainer",
+      "color": "teal",
+      "inputs": [{ "id": "in", "label": "features" }],
+      "outputs": [{ "id": "out", "label": "model" }]
+    },
+    {
+      "id": "registry",
+      "kind": "sink",
+      "label": "Model registry",
+      "color": "amber",
+      "inputs": [{ "id": "in", "label": "model" }]
+    },
+    {
+      "id": "note-nightly",
+      "kind": "note",
+      "label": "Runs nightly at 02:00 UTC",
+      "sections": [
+        {
+          "id": "sla",
+          "label": "SLA",
+          "items": ["< 90 minutes", "alert owner on failure"]
+        }
+      ]
+    }
+  ],
+  "edges": [
+    { "id": "e-raw-load", "source": "raw", "target": "load", "label": "raw" },
+    { "id": "e-load-norm", "source": "load", "target": "norm" },
+    { "id": "e-norm-features", "source": "norm", "target": "features" },
+    { "id": "e-features-train", "source": "features", "target": "train" },
+    { "id": "e-train-registry", "source": "train", "target": "registry" },
+    {
+      "id": "e-norm-sink",
+      "source": "norm",
+      "sourcePort": "metrics",
+      "target": "registry",
+      "label": "stats",
+      "variant": "dashed"
+    }
+  ]
+}

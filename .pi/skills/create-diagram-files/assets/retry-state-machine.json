@@ -1,0 +1,102 @@
+{
+  "specVersion": "1",
+  "meta": {
+    "id": "retry-state-machine",
+    "title": "Retry State Machine",
+    "order": 30,
+    "description": "What happens to a request that fails. The pink diamond is the branch, the animated edge is the retry loop, the dashed edge is the retry decision."
+  },
+  "direction": "LR",
+  "nodes": [
+    {
+      "id": "request",
+      "kind": "source",
+      "label": "Request",
+      "outputs": [{ "id": "out", "label": "call" }]
+    },
+    {
+      "id": "attempt",
+      "kind": "task",
+      "label": "Attempt call",
+      "inputs": [{ "id": "in", "label": "call" }],
+      "outputs": [{ "id": "out", "label": "result" }]
+    },
+    {
+      "id": "decide",
+      "kind": "decision",
+      "label": "Retry?",
+      "inputs": [{ "id": "in", "label": "result" }],
+      "outputs": [
+        { "id": "retry", "label": "yes" },
+        { "id": "giveup", "label": "no" }
+      ],
+      "sections": [
+        {
+          "id": "policy",
+          "label": "Policy",
+          "items": ["exponential backoff", "reset after 60s"]
+        }
+      ]
+    },
+    {
+      "id": "backoff",
+      "kind": "task",
+      "label": "Backoff",
+      "color": "amber",
+      "inputs": [{ "id": "in", "label": "retry" }],
+      "outputs": [{ "id": "out", "label": "wait" }],
+      "sections": [
+        {
+          "id": "delays",
+          "label": "Delays",
+          "items": ["250ms", "500ms", "1000ms"]
+        }
+      ]
+    },
+    {
+      "id": "success",
+      "kind": "sink",
+      "label": "Success",
+      "color": "green",
+      "inputs": [{ "id": "in", "label": "ok" }]
+    },
+    {
+      "id": "failed",
+      "kind": "sink",
+      "label": "Failed",
+      "color": "red",
+      "inputs": [{ "id": "in", "label": "error" }]
+    },
+    {
+      "id": "note-budget",
+      "kind": "note",
+      "label": "Max 3 attempts per request"
+    }
+  ],
+  "edges": [
+    { "id": "e-request-attempt", "source": "request", "target": "attempt" },
+    { "id": "e-attempt-decide", "source": "attempt", "target": "decide" },
+    {
+      "id": "e-decide-backoff",
+      "source": "decide",
+      "sourcePort": "retry",
+      "target": "backoff",
+      "label": "yes",
+      "variant": "dashed"
+    },
+    {
+      "id": "e-backoff-attempt",
+      "source": "backoff",
+      "target": "attempt",
+      "label": "wait",
+      "variant": "animated"
+    },
+    {
+      "id": "e-decide-failed",
+      "source": "decide",
+      "sourcePort": "giveup",
+      "target": "failed"
+    },
+    { "id": "e-attempt-success", "source": "attempt", "target": "success" }
+  ]
+}

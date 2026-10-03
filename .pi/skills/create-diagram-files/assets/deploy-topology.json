@@ -1,0 +1,105 @@
+{
+  "specVersion": "1",
+  "meta": {
+    "id": "deploy-topology",
+    "title": "Deploy Topology",
+    "order": 20,
+    "description": "Public request path down to the data tier. Teal boxes are long-running services, violet boxes are stateful stores, the red box is the failure path."
+  },
+  "direction": "TB",
+  "nodes": [
+    {
+      "id": "users",
+      "kind": "source",
+      "label": "Users",
+      "outputs": [{ "id": "out", "label": "https" }]
+    },
+    {
+      "id": "lb",
+      "kind": "service",
+      "label": "Load balancer",
+      "inputs": [{ "id": "in", "label": "https" }],
+      "outputs": [{ "id": "out", "label": "http" }]
+    },
+    {
+      "id": "api",
+      "kind": "service",
+      "label": "API",
+      "inputs": [{ "id": "in", "label": "http" }],
+      "outputs": [
+        { "id": "db", "label": "sql" },
+        { "id": "cache", "label": "kv" },
+        { "id": "jobs", "label": "enqueue" }
+      ],
+      "sections": [
+        {
+          "id": "endpoints",
+          "label": "Endpoints",
+          "items": ["GET /v1/items", "POST /v1/items", "GET /healthz"]
+        }
+      ]
+    },
+    {
+      "id": "data",
+      "kind": "group",
+      "label": "Data tier",
+      "color": "slate"
+    },
+    {
+      "id": "postgres",
+      "kind": "store",
+      "parent": "data",
+      "label": "Postgres",
+      "color": "violet",
+      "inputs": [{ "id": "in", "label": "sql" }],
+      "outputs": [{ "id": "out", "label": "rows" }]
+    },
+    {
+      "id": "redis",
+      "kind": "store",
+      "parent": "data",
+      "label": "Redis",
+      "color": "violet",
+      "inputs": [{ "id": "in", "label": "kv" }],
+      "outputs": [{ "id": "out", "label": "hit" }]
+    },
+    {
+      "id": "queue",
+      "kind": "service",
+      "label": "Queue",
+      "color": "amber",
+      "inputs": [{ "id": "in", "label": "enqueue" }],
+      "outputs": [{ "id": "out", "label": "job" }]
+    },
+    {
+      "id": "worker",
+      "kind": "service",
+      "label": "Worker",
+      "color": "teal",
+      "inputs": [{ "id": "in", "label": "job" }],
+      "outputs": [{ "id": "out", "label": "result" }]
+    },
+    {
+      "id": "dlq",
+      "kind": "sink",
+      "label": "Dead-letter",
+      "color": "red",
+      "inputs": [{ "id": "in", "label": "failed" }]
+    }
+  ],
+  "edges": [
+    { "id": "e-users-lb", "source": "users", "target": "lb" },
+    { "id": "e-lb-api", "source": "lb", "target": "api" },
+    { "id": "e-api-pg", "source": "api", "sourcePort": "db", "target": "postgres" },
+    { "id": "e-api-redis", "source": "api", "sourcePort": "cache", "target": "redis" },
+    { "id": "e-api-queue", "source": "api", "sourcePort": "jobs", "target": "queue" },
+    { "id": "e-queue-worker", "source": "queue", "target": "worker" },
+    {
+      "id": "e-worker-dlq",
+      "source": "worker",
+      "target": "dlq",
+      "label": "3 fails",
+      "variant": "dashed"
+    }
+  ]
+}
